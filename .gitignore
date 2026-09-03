@@ -1,0 +1,54 @@
+## Build and intermediate output
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+## Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## JetBrains Rider / ReSharper
+.idea/
+_ReSharper*/
+*.DotSettings.user
+
+## Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.history/
+
+## Test & Coverage
+[Tt]est[Rr]esult*/
+coverage/
+*.trx
+*.coverage
+*.coveragexml
+*.opencover.xml
+
+## NuGet
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+project.lock.json
+project.assets.json
+
+## Local environment & secrets
+.env
+.env.*
+*.env
+!.env.example
+appsettings*.local.json
+secrets.json
+
+## OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
