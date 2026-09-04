@@ -12,14 +12,17 @@ using TicketFlow.Api.Domain.Tickets;
 ///
 /// For each pending ticket the worker calls <see cref="ITicketClassifier"/>
 /// and receives an untrusted <see cref="ClassificationCandidate"/>. The
-/// candidate is NOT persisted in this step: model output is untrusted and
-/// validation belongs to the next step. Status transitions (Classified /
-/// Failed) and attempt counting are intentionally not touched yet.
+/// candidate is then validated by <see cref="ITicketClassificationValidator"/>
+/// to produce a <see cref="ClassificationResult"/>. Neither the untrusted
+/// candidate nor the validated result is persisted in this step: status
+/// transitions (Classified / Failed) and attempt counting are intentionally
+/// not touched yet.
 /// </summary>
 public sealed class ClassificationWorker(
     IServiceScopeFactory scopeFactory,
     ITicketWorkSignal workSignal,
     ITicketClassifier classifier,
+    ITicketClassificationValidator validator,
     ILogger<ClassificationWorker> logger) : BackgroundService
 {
     /// <summary>Bounds concurrent classifications to keep provider load predictable.</summary>
@@ -103,13 +106,33 @@ public sealed class ClassificationWorker(
 
         try
         {
-            // Untrusted model output: received here, logged as produced,
-            // never persisted in this step.
-            _ = await classifier.ClassifyAsync(ticket, cancellationToken);
+            var candidate = await classifier.ClassifyAsync(ticket, cancellationToken);
 
             logger.LogInformation(
                 "Worker produced classification candidate for ticket {TicketId}.",
                 ticket.Id);
+
+            var result = validator.Validate(candidate);
+
+            if (result.IsValid)
+            {
+                logger.LogInformation(
+                    "Classification candidate for ticket {TicketId} passed validation.",
+                    ticket.Id);
+
+                // Validated result is available as result.Classification
+                // (a ValidatedClassification with TicketCategory, TicketPriority, string).
+                // Persistence will be added in the next step.
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Classification candidate for ticket {TicketId} failed validation: {Errors}",
+                    ticket.Id,
+                    string.Join("; ", result.Errors));
+
+                // Retry / failure handling will be added in the next step.
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

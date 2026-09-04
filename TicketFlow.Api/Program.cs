@@ -31,6 +31,7 @@ builder.Services.AddSingleton<ITicketWorkSignal, ChannelTicketWorkSignal>();
 // The worker depends only on the abstraction; the deterministic fake stands
 // in for a real LLM provider until one is integrated.
 builder.Services.AddSingleton<ITicketClassifier, FakeTicketClassifier>();
+builder.Services.AddSingleton<ITicketClassificationValidator, TicketClassificationValidator>();
 builder.Services.AddHostedService<ClassificationWorker>();
 
 builder.Services.AddEndpointsApiExplorer();
