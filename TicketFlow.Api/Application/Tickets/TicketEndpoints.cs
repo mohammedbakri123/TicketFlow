@@ -1,6 +1,7 @@
 namespace TicketFlow.Api.Application.Tickets;
 
 using Microsoft.AspNetCore.Http;
+using TicketFlow.Api.Application.Classification;
 using TicketFlow.Api.Domain.Tickets;
 
 public static class TicketEndpoints
@@ -20,6 +21,7 @@ public static class TicketEndpoints
         app.MapPost("/tickets", async (
             CreateTicketRequest? request,
             TicketService ticketService,
+            ITicketWorkSignal workSignal,
             CancellationToken cancellationToken) =>
         {
             if (request is null)
@@ -67,7 +69,15 @@ public static class TicketEndpoints
                 Body = request.Body!.Trim()
             };
 
-            await ticketService.CreateAsync(ticket, cancellationToken);
+            var created = await ticketService.CreateAsync(ticket, cancellationToken);
+
+            // Notify the background worker only after a new ticket was
+            // persisted. A duplicate submission is an idempotent no-op and
+            // must not signal new work. The endpoint never classifies.
+            if (created)
+            {
+                workSignal.Signal();
+            }
 
             return Results.Accepted($"/tickets/{ticket.Id}", new { id = ticket.Id, status = TicketStatus.Pending });
         })
