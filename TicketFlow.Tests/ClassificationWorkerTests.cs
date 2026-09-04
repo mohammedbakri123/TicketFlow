@@ -39,6 +39,12 @@ public class ClassificationWorkerTests
         }
     }
 
+    private sealed class CustomCandidateClassifier(ClassificationCandidate candidate) : ITicketClassifier
+    {
+        public Task<ClassificationCandidate> ClassifyAsync(Ticket ticket, CancellationToken cancellationToken = default)
+            => Task.FromResult(candidate);
+    }
+
     private sealed class TestLogger : ILogger<ClassificationWorker>
     {
         private readonly object gate = new();
@@ -157,32 +163,20 @@ public class ClassificationWorkerTests
     }
 
     [Fact]
-    public async Task Scan_DoesNotMarkTicketsClassifiedAtThisStage()
+    public async Task Scan_ValidClassification_PersistsFieldsAndMarksClassified()
     {
         var (scopeFactory, classifier, logger) = CreateWorkerDependencies();
-        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b" });
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 0 });
 
         await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
 
         var ticket = await GetTicketAsync(scopeFactory, "t-1001");
-        Assert.Equal(TicketStatus.Pending, ticket.Status);
-    }
-
-    [Fact]
-    public async Task Scan_DoesNotPersistUnvalidatedClassification()
-    {
-        // The stub returns a plausible candidate, but nothing may reach the
-        // ticket before validation (next step).
-        var (scopeFactory, classifier, logger) = CreateWorkerDependencies();
-        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b" });
-
-        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
-
-        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
-        Assert.Equal(TicketStatus.Pending, ticket.Status);
-        Assert.Null(ticket.Category);
-        Assert.Null(ticket.Priority);
-        Assert.Null(ticket.Summary);
+        Assert.Equal(TicketStatus.Classified, ticket.Status);
+        Assert.Equal(TicketCategory.Billing, ticket.Category);
+        Assert.Equal(TicketPriority.High, ticket.Priority);
+        Assert.Equal("The customer reports being charged twice.", ticket.Summary);
+        Assert.Equal(1, ticket.Attempts);
+        Assert.True(ticket.UpdatedAt >= ticket.CreatedAt);
     }
 
     /// <summary>
@@ -240,50 +234,201 @@ public class ClassificationWorkerTests
         Assert.Equal(4, classifier.ProcessedTicketIds.Count);
     }
 
-    // ---- Validation integration ----
+    // ---- Persistence and Retry/Failure Integration ----
 
     [Fact]
-    public async Task Scan_ValidCandidate_DoesNotPersistBeforePersistenceStep()
-    {
-        // The stub returns a valid candidate; the real validator will accept it.
-        // Even so, no fields should be written to the ticket yet.
-        var (scopeFactory, classifier, logger) = CreateWorkerDependencies();
-        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b" });
-
-        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
-
-        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
-        Assert.Equal(TicketStatus.Pending, ticket.Status);
-        Assert.Null(ticket.Category);
-        Assert.Null(ticket.Priority);
-        Assert.Null(ticket.Summary);
-        Assert.Equal(0, ticket.Attempts);
-    }
-
-    /// <summary>Classifier that always returns an invalid candidate (unrecognized values).</summary>
-    private sealed class InvalidCandidateClassifier : ITicketClassifier
-    {
-        public Task<ClassificationCandidate> ClassifyAsync(Ticket ticket, CancellationToken cancellationToken = default)
-            => Task.FromResult(new ClassificationCandidate("banana", "urgent", null));
-    }
-
-    [Fact]
-    public async Task Scan_InvalidCandidate_DoesNotPersist_LogsWarning()
+    public async Task Scan_InvalidCategory_IncrementsAttempts_RemainsPending_NoFieldsPersisted()
     {
         var (scopeFactory, _, logger) = CreateWorkerDependencies();
-        var classifier = new InvalidCandidateClassifier();
-        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b" });
+        var classifier = new FakeTicketClassifier(FakeClassifierMode.InvalidCategory);
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 0 });
 
         await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
 
         var ticket = await GetTicketAsync(scopeFactory, "t-1001");
         Assert.Equal(TicketStatus.Pending, ticket.Status);
+        Assert.Equal(1, ticket.Attempts);
         Assert.Null(ticket.Category);
         Assert.Null(ticket.Priority);
         Assert.Null(ticket.Summary);
-        Assert.Equal(0, ticket.Attempts);
-
-        // The worker should have logged a warning about the invalid candidate.
         Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("t-1001"));
+    }
+
+    [Fact]
+    public async Task Scan_InvalidPriority_IncrementsAttempts_RemainsPending_NoFieldsPersisted()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new FakeTicketClassifier(FakeClassifierMode.InvalidPriority);
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 0 });
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Pending, ticket.Status);
+        Assert.Equal(1, ticket.Attempts);
+        Assert.Null(ticket.Category);
+        Assert.Null(ticket.Priority);
+        Assert.Null(ticket.Summary);
+    }
+
+    [Fact]
+    public async Task Scan_EmptySummary_IncrementsAttempts_RemainsPending_NoFieldsPersisted()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new FakeTicketClassifier(FakeClassifierMode.EmptySummary);
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 0 });
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Pending, ticket.Status);
+        Assert.Equal(1, ticket.Attempts);
+        Assert.Null(ticket.Category);
+        Assert.Null(ticket.Priority);
+        Assert.Null(ticket.Summary);
+    }
+
+    [Fact]
+    public async Task Scan_MalformedCandidate_IncrementsAttempts_RemainsPending_NoFieldsPersisted()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new FakeTicketClassifier(FakeClassifierMode.Malformed);
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 0 });
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Pending, ticket.Status);
+        Assert.Equal(1, ticket.Attempts);
+        Assert.Null(ticket.Category);
+        Assert.Null(ticket.Priority);
+        Assert.Null(ticket.Summary);
+    }
+
+    [Fact]
+    public async Task Scan_ClassifierException_IncrementsAttempts_RemainsPending_NoFieldsPersisted()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new FakeTicketClassifier(FakeClassifierMode.Throw);
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 0 });
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Pending, ticket.Status);
+        Assert.Equal(1, ticket.Attempts);
+        Assert.Null(ticket.Category);
+        Assert.Null(ticket.Priority);
+        Assert.Null(ticket.Summary);
+        Assert.Contains(logger.Entries, e => e.Level == LogLevel.Error && e.Message.Contains("t-1001"));
+    }
+
+    [Fact]
+    public async Task Scan_ThirdFailedAttempt_TransitionsStatusToFailed()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new FakeTicketClassifier(FakeClassifierMode.InvalidCategory);
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 2, Status = TicketStatus.Pending });
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Failed, ticket.Status);
+        Assert.Equal(3, ticket.Attempts);
+        Assert.Null(ticket.Category);
+        Assert.Null(ticket.Priority);
+        Assert.Null(ticket.Summary);
+    }
+
+    [Fact]
+    public async Task Scan_SuccessfulRetryAfterPreviousFailure_PersistsClassificationAndMarksClassified()
+    {
+        var (scopeFactory, classifier, logger) = CreateWorkerDependencies();
+        // Previous attempt failed, so Attempts starts at 1
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 1, Status = TicketStatus.Pending });
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Classified, ticket.Status);
+        Assert.Equal(2, ticket.Attempts);
+        Assert.Equal(TicketCategory.Billing, ticket.Category);
+        Assert.Equal(TicketPriority.High, ticket.Priority);
+        Assert.Equal("The customer reports being charged twice.", ticket.Summary);
+    }
+
+    [Fact]
+    public async Task Scan_FailedAttempt_NeverPartiallyPersistsCandidate()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        // Candidate has invalid category, but valid priority and summary
+        var classifier = new CustomCandidateClassifier(new ClassificationCandidate("banana", "high", "Valid summary"));
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 0, Status = TicketStatus.Pending });
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Pending, ticket.Status);
+        Assert.Equal(1, ticket.Attempts);
+        Assert.Null(ticket.Category);
+        Assert.Null(ticket.Priority);
+        Assert.Null(ticket.Summary);
+    }
+
+    [Fact]
+    public async Task Scan_ParallelProcessing_NoDbContextConcurrencyExceptions()
+    {
+        var (scopeFactory, classifier, logger) = CreateWorkerDependencies();
+        var tickets = Enumerable.Range(1, 20)
+            .Select(i => new Ticket { Id = $"t-{i:D4}", Subject = $"Subject {i}", Body = $"Body {i}", Attempts = 0, Status = TicketStatus.Pending })
+            .ToArray();
+        await SeedTicketsAsync(scopeFactory, tickets);
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        for (var i = 1; i <= 20; i++)
+        {
+            var ticket = await GetTicketAsync(scopeFactory, $"t-{i:D4}");
+            Assert.Equal(TicketStatus.Classified, ticket.Status);
+            Assert.Equal(TicketCategory.Billing, ticket.Category);
+            Assert.Equal(TicketPriority.High, ticket.Priority);
+            Assert.Equal(1, ticket.Attempts);
+        }
+    }
+
+    [Fact]
+    public async Task Repository_StaleUpdate_DoesNotOverwriteClassifiedTicket()
+    {
+        var (scopeFactory, _, _) = CreateWorkerDependencies();
+        var classifiedTicket = new Ticket
+        {
+            Id = "t-classified",
+            Subject = "Subject",
+            Body = "Body",
+            Status = TicketStatus.Classified,
+            Category = TicketCategory.Billing,
+            Priority = TicketPriority.High,
+            Summary = "Original Summary",
+            Attempts = 1
+        };
+        await SeedTicketsAsync(scopeFactory, classifiedTicket);
+
+        using var scope = scopeFactory.CreateScope();
+        var repository = scope.ServiceProvider.GetRequiredService<ITicketRepository>();
+
+        var saveResult = await repository.SaveClassificationAsync(
+            "t-classified",
+            new ValidatedClassification(TicketCategory.Technical, TicketPriority.Low, "New Summary"));
+        Assert.False(saveResult);
+
+        var failResult = await repository.RecordClassificationFailureAsync("t-classified");
+        Assert.False(failResult);
+
+        var ticket = await GetTicketAsync(scopeFactory, "t-classified");
+        Assert.Equal(TicketStatus.Classified, ticket.Status);
+        Assert.Equal(TicketCategory.Billing, ticket.Category);
+        Assert.Equal(TicketPriority.High, ticket.Priority);
+        Assert.Equal("Original Summary", ticket.Summary);
+        Assert.Equal(1, ticket.Attempts);
     }
 }

@@ -13,10 +13,11 @@ using TicketFlow.Api.Domain.Tickets;
 /// For each pending ticket the worker calls <see cref="ITicketClassifier"/>
 /// and receives an untrusted <see cref="ClassificationCandidate"/>. The
 /// candidate is then validated by <see cref="ITicketClassificationValidator"/>
-/// to produce a <see cref="ClassificationResult"/>. Neither the untrusted
-/// candidate nor the validated result is persisted in this step: status
-/// transitions (Classified / Failed) and attempt counting are intentionally
-/// not touched yet.
+/// to produce a <see cref="ClassificationResult"/>.
+/// Validated results are atomically persisted as Classified. For failed attempts
+/// (due to classifier exceptions or invalid candidates), Attempts is incremented;
+/// if Attempts reaches 3, the ticket transitions to Failed, otherwise it remains
+/// Pending for future scan/retry.
 /// </summary>
 public sealed class ClassificationWorker(
     IServiceScopeFactory scopeFactory,
@@ -84,10 +85,9 @@ public sealed class ClassificationWorker(
         {
             // Process tickets concurrently with bounded parallelism. The
             // pending tickets were fetched with a single completed query on
-            // one scoped DbContext; the per-ticket work below touches only
-            // the classifier, so no DbContext is shared between parallel
-            // operations. (When persistence is added, each ticket will need
-            // its own scope — that belongs to the persistence step.)
+            // one scoped DbContext; each parallel ticket classification creates
+            // its own DI scope and DbContext, so no DbContext is shared across
+            // parallel operations.
             await Parallel.ForEachAsync(
                 pendingTickets,
                 new ParallelOptions
@@ -104,11 +104,10 @@ public sealed class ClassificationWorker(
     }
 
     /// <summary>
-    /// Unit of work for a single ticket: passes it to the classifier and logs
-    /// the result. Only ticket ids are logged — never ticket bodies or model
-    /// summaries, because ticket content is untrusted and may contain
-    /// sensitive customer data. A classifier failure for one ticket is logged
-    /// and does not stop the worker from processing the other tickets.
+    /// Unit of work for a single ticket: passes it to the classifier, validates the candidate,
+    /// and persists either the trusted classification or records an attempt failure.
+    /// Each parallel operation creates a dedicated async DI scope for its repository/DbContext.
+    /// Only ticket ids and non-sensitive statuses are logged — never ticket bodies or model summaries.
     /// </summary>
     private async ValueTask ProcessTicketAsync(Ticket ticket, CancellationToken cancellationToken)
     {
@@ -116,32 +115,51 @@ public sealed class ClassificationWorker(
 
         try
         {
-            var candidate = await classifier.ClassifyAsync(ticket, cancellationToken);
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var ticketRepository = scope.ServiceProvider.GetRequiredService<ITicketRepository>();
 
-            logger.LogInformation(
-                "Worker produced classification candidate for ticket {TicketId}.",
-                ticket.Id);
+            ClassificationResult? result = null;
+            Exception? classifierException = null;
 
-            var result = validator.Validate(candidate);
+            try
+            {
+                var candidate = await classifier.ClassifyAsync(ticket, cancellationToken);
 
-            if (result.IsValid)
+                logger.LogInformation(
+                    "Worker produced classification candidate for ticket {TicketId}.",
+                    ticket.Id);
+
+                result = validator.Validate(candidate);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                classifierException = ex;
+                logger.LogError(ex, "Classification failed for ticket {TicketId}.", ticket.Id);
+            }
+
+            if (classifierException is null && result is { IsValid: true, Classification: not null })
             {
                 logger.LogInformation(
                     "Classification candidate for ticket {TicketId} passed validation.",
                     ticket.Id);
 
-                // Validated result is available as result.Classification
-                // (a ValidatedClassification with TicketCategory, TicketPriority, string).
-                // Persistence will be added in the next step.
+                await ticketRepository.SaveClassificationAsync(ticket.Id, result.Classification, cancellationToken);
             }
             else
             {
-                logger.LogWarning(
-                    "Classification candidate for ticket {TicketId} failed validation: {Errors}",
-                    ticket.Id,
-                    string.Join("; ", result.Errors));
+                if (result is { IsValid: false })
+                {
+                    logger.LogWarning(
+                        "Classification candidate for ticket {TicketId} failed validation: {Errors}",
+                        ticket.Id,
+                        string.Join("; ", result.Errors));
+                }
 
-                // Retry / failure handling will be added in the next step.
+                await ticketRepository.RecordClassificationFailureAsync(ticket.Id, cancellationToken);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -150,9 +168,9 @@ public sealed class ClassificationWorker(
         }
         catch (Exception ex)
         {
-            // One bad ticket (or provider failure) must not stop the
+            // One bad ticket or unexpected persistence failure must not stop the
             // worker or the remaining pending tickets.
-            logger.LogError(ex, "Classification failed for ticket {TicketId}.", ticket.Id);
+            logger.LogError(ex, "Failed to process ticket {TicketId}.", ticket.Id);
         }
     }
 }

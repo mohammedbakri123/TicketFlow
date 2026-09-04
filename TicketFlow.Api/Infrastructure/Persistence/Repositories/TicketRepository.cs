@@ -3,6 +3,7 @@ namespace TicketFlow.Api.Infrastructure.Persistence.Repositories;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using TicketFlow.Api.Application.Classification;
 using TicketFlow.Api.Domain.Tickets;
 using TicketFlow.Api.Infrastructure.Persistence;
 
@@ -112,5 +113,94 @@ public class TicketRepository(TicketFlowDbContext db, ILogger<TicketRepository> 
             .OrderBy(t => t.CreatedAt)
             .ThenBy(t => t.Id)
             .ToListAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Atomically persists validated classification for a pending ticket and marks it Classified.
+    /// If the ticket is not found or is no longer Pending (stale work), returns false without overwriting.
+    /// </summary>
+    public async Task<bool> SaveClassificationAsync(
+        string id,
+        ValidatedClassification classification,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        ArgumentNullException.ThrowIfNull(classification);
+
+        var ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
+        if (ticket is null)
+        {
+            logger.LogWarning("Cannot save classification: ticket '{TicketId}' was not found.", id);
+            return false;
+        }
+
+        if (ticket.Status != TicketStatus.Pending)
+        {
+            logger.LogWarning(
+                "Cannot save classification: ticket '{TicketId}' is not in Pending status (current status: {Status}). Stale update ignored.",
+                id,
+                ticket.Status);
+            return false;
+        }
+
+        ticket.Category = classification.Category;
+        ticket.Priority = classification.Priority;
+        ticket.Summary = classification.Summary;
+        ticket.Status = TicketStatus.Classified;
+        ticket.Attempts += 1;
+        ticket.UpdatedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation(
+            "Ticket '{TicketId}' classified successfully (Category: {Category}, Priority: {Priority}, Attempts: {Attempts}).",
+            id,
+            ticket.Category,
+            ticket.Priority,
+            ticket.Attempts);
+        return true;
+    }
+
+    /// <summary>
+    /// Records a failed classification attempt by incrementing Attempts and updating UpdatedAt.
+    /// Transitions Status to Failed once Attempts reaches 3; otherwise remains Pending.
+    /// If the ticket is not found or is no longer Pending (stale work), returns false without overwriting.
+    /// Model outputs are never persisted.
+    /// </summary>
+    public async Task<bool> RecordClassificationFailureAsync(
+        string id,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+
+        var ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
+        if (ticket is null)
+        {
+            logger.LogWarning("Cannot record classification failure: ticket '{TicketId}' was not found.", id);
+            return false;
+        }
+
+        if (ticket.Status != TicketStatus.Pending)
+        {
+            logger.LogWarning(
+                "Cannot record classification failure: ticket '{TicketId}' is not in Pending status (current status: {Status}). Stale update ignored.",
+                id,
+                ticket.Status);
+            return false;
+        }
+
+        ticket.Attempts += 1;
+        if (ticket.Attempts >= 3)
+        {
+            ticket.Status = TicketStatus.Failed;
+        }
+        ticket.UpdatedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation(
+            "Recorded classification failure for ticket '{TicketId}'. Attempts: {Attempts}, Status: {Status}.",
+            id,
+            ticket.Attempts,
+            ticket.Status);
+        return true;
     }
 }
