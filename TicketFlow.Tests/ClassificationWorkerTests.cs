@@ -84,8 +84,10 @@ public class ClassificationWorkerTests
     private static ClassificationWorker CreateWorker(
         IServiceScopeFactory scopeFactory,
         ITicketClassifier classifier,
-        TestLogger logger)
-        => new(scopeFactory, new ChannelTicketWorkSignal(), classifier, logger);
+        TestLogger logger,
+        ITicketClassificationValidator? validator = null)
+        => new(scopeFactory, new ChannelTicketWorkSignal(), classifier,
+               validator ?? new TicketClassificationValidator(), logger);
 
     private static async Task SeedTicketsAsync(IServiceScopeFactory scopeFactory, params Ticket[] tickets)
     {
@@ -236,5 +238,52 @@ public class ClassificationWorkerTests
         // All four tickets were processed, which is only possible if the scan
         // ran them concurrently (bounded by MaxDegreeOfParallelism = 4).
         Assert.Equal(4, classifier.ProcessedTicketIds.Count);
+    }
+
+    // ---- Validation integration ----
+
+    [Fact]
+    public async Task Scan_ValidCandidate_DoesNotPersistBeforePersistenceStep()
+    {
+        // The stub returns a valid candidate; the real validator will accept it.
+        // Even so, no fields should be written to the ticket yet.
+        var (scopeFactory, classifier, logger) = CreateWorkerDependencies();
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b" });
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Pending, ticket.Status);
+        Assert.Null(ticket.Category);
+        Assert.Null(ticket.Priority);
+        Assert.Null(ticket.Summary);
+        Assert.Equal(0, ticket.Attempts);
+    }
+
+    /// <summary>Classifier that always returns an invalid candidate (unrecognized values).</summary>
+    private sealed class InvalidCandidateClassifier : ITicketClassifier
+    {
+        public Task<ClassificationCandidate> ClassifyAsync(Ticket ticket, CancellationToken cancellationToken = default)
+            => Task.FromResult(new ClassificationCandidate("banana", "urgent", null));
+    }
+
+    [Fact]
+    public async Task Scan_InvalidCandidate_DoesNotPersist_LogsWarning()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new InvalidCandidateClassifier();
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b" });
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Pending, ticket.Status);
+        Assert.Null(ticket.Category);
+        Assert.Null(ticket.Priority);
+        Assert.Null(ticket.Summary);
+        Assert.Equal(0, ticket.Attempts);
+
+        // The worker should have logged a warning about the invalid candidate.
+        Assert.Contains(logger.Entries, e => e.Level == LogLevel.Warning && e.Message.Contains("t-1001"));
     }
 }
