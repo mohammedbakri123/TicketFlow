@@ -20,9 +20,9 @@ public sealed class ClassificationWorker(
     {
         logger.LogInformation("Ticket classification worker started.");
 
-        // Startup recovery: PostgreSQL is the source of truth, not the
-        // in-memory signal. Tickets saved as pending before a crash are
-        // still there when the application restarts.
+        ///run this once on startup to recover
+        /// any pending tickets that were persisted before a crash or restart, 
+        /// even if their signal was lost.
         await ScanPendingTicketsAsync(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
