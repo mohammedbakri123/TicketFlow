@@ -1,4 +1,7 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
+using TicketFlow.Api.Application.Tickets;
 using TicketFlow.Api.Infrastructure.Persistence;
 
 LoadEnv();
@@ -13,9 +16,17 @@ builder.Services.AddDbContext<TicketFlowDbContext>(options =>
     options.UseNpgsql(connectionString);
 });
 
+builder.Services.AddScoped<TicketService>();
+
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    // Serialize enums as camelCase strings, e.g. "pending", "billing", "high".
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+});
+
 var app = builder.Build();
 
-app.MapGet("/", () => "Hello World!");
+app.MapTicketEndpoints();
 
 app.Run();
 
@@ -68,3 +79,5 @@ static void LoadEnv()
     }
 }
 
+
+public partial class Program { }
