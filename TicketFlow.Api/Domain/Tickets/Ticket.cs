@@ -2,7 +2,9 @@ namespace TicketFlow.Api.Domain.Tickets;
 
 public class Ticket
 {
-    public Guid Id { get; set; } = Guid.NewGuid();
+    // Client-supplied external id (e.g. "t-1001"). The primary key on this
+    // column is the final uniqueness guarantee for idempotent submissions.
+    public string Id { get; set; } = string.Empty;
 
     public string Subject { get; set; } = string.Empty;
 
