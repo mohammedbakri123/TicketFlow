@@ -1,7 +1,7 @@
 namespace TicketFlow.Api.Application.Tickets;
 
 using Microsoft.AspNetCore.Http;
-using TicketFlow.Api.Application.Classification;
+using TicketFlow.Api.Application.BackgroundWork;
 using TicketFlow.Api.Domain.Tickets;
 
 public static class TicketEndpoints

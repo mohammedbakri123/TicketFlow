@@ -1,4 +1,4 @@
-namespace TicketFlow.Api.Application.Classification;
+namespace TicketFlow.Api.Application.BackgroundWork;
 
 using System.Threading.Channels;
 

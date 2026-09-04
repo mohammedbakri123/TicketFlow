@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
+using TicketFlow.Api.Application.BackgroundWork;
 using TicketFlow.Api.Application.Classification;
 using TicketFlow.Api.Application.Tickets;
 using TicketFlow.Api.Infrastructure.Persistence;

@@ -1,4 +1,4 @@
-namespace TicketFlow.Api.Application.Classification;
+namespace TicketFlow.Api.Application.BackgroundWork;
 
 /// <summary>
 /// In-process signal used to wake the classification worker when new ticket

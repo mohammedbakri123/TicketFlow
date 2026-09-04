@@ -1,6 +1,7 @@
 namespace TicketFlow.Api.Application.Classification;
 
 using Microsoft.EntityFrameworkCore;
+using TicketFlow.Api.Application.BackgroundWork;
 using TicketFlow.Api.Domain.Tickets;
 using TicketFlow.Api.Infrastructure.Persistence;
 
