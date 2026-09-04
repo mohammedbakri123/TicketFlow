@@ -13,5 +13,8 @@ public interface ITicketRepository
         int pageSize,
         CancellationToken cancellationToken = default);
 
-    Task<IReadOnlyList<string>> GetPendingTicketIdsAsync(CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Finds pending tickets ordered by creation time and id.
+    /// </summary>
+    Task<IReadOnlyList<Ticket>> GetPendingTicketsAsync(CancellationToken cancellationToken = default);
 }

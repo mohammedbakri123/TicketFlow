@@ -6,23 +6,28 @@ using TicketFlow.Api.Domain.Tickets;
 /// <summary>
 /// Background worker for ticket classification. Runs in the same process as
 /// the HTTP API. It is woken by <see cref="ITicketWorkSignal"/> when new work
-/// may exist, then queries PostgreSQL for pending tickets. On startup it
+/// may exist, then queries the repository for pending tickets. On startup it
 /// performs a recovery scan so tickets persisted before a crash or restart
-/// are picked up even if their signal was lost. In this step no classification
-/// happens yet: pending tickets are only identified and logged.
+/// are picked up even if their signal was lost.
+///
+/// For each pending ticket the worker calls <see cref="ITicketClassifier"/>
+/// and receives an untrusted <see cref="ClassificationCandidate"/>. The
+/// candidate is NOT persisted in this step: model output is untrusted and
+/// validation belongs to the next step. Status transitions (Classified /
+/// Failed) and attempt counting are intentionally not touched yet.
 /// </summary>
 public sealed class ClassificationWorker(
     IServiceScopeFactory scopeFactory,
     ITicketWorkSignal workSignal,
+    ITicketClassifier classifier,
     ILogger<ClassificationWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("Ticket classification worker started.");
 
-        ///run this once on startup to recover
-        /// any pending tickets that were persisted before a crash or restart, 
-        /// even if their signal was lost.
+        // Run this once on startup to recover any pending tickets that were
+        // persisted before a crash or restart, even if their signal was lost.
         await ScanPendingTicketsAsync(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -33,9 +38,11 @@ public sealed class ClassificationWorker(
     }
 
     /// <summary>
-    /// Finds pending tickets and logs that they are available for processing.
-    /// Only ticket ids are read and logged — never ticket bodies, because
+    /// Finds pending tickets and passes each one to the classifier. Only
+    /// ticket ids are logged — never ticket bodies or model summaries, because
     /// ticket content is untrusted and may contain sensitive customer data.
+    /// A classifier failure for one ticket is logged and does not stop the
+    /// worker from processing the remaining tickets.
     /// </summary>
     internal async Task ScanPendingTicketsAsync(CancellationToken cancellationToken)
     {
@@ -44,19 +51,42 @@ public sealed class ClassificationWorker(
             await using var scope = scopeFactory.CreateAsyncScope();
             var ticketRepository = scope.ServiceProvider.GetRequiredService<ITicketRepository>();
 
-            var pendingIds = await ticketRepository.GetPendingTicketIdsAsync(cancellationToken);
+            var pendingTickets = await ticketRepository.GetPendingTicketsAsync(cancellationToken);
 
-            if (pendingIds.Count == 0)
+            if (pendingTickets.Count == 0)
             {
                 logger.LogDebug("Worker found no pending tickets.");
                 return;
             }
 
-            logger.LogInformation("Worker found {Count} pending tickets.", pendingIds.Count);
+            logger.LogInformation("Worker found {Count} pending tickets.", pendingTickets.Count);
 
-            foreach (var id in pendingIds)
+            foreach (var ticket in pendingTickets)
             {
-                logger.LogInformation("Worker found pending ticket {TicketId}.", id);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                logger.LogInformation("Worker found pending ticket {TicketId}.", ticket.Id);
+
+                try
+                {
+                    // Untrusted model output: received here, logged as produced,
+                    // never persisted in this step.
+                    _ = await classifier.ClassifyAsync(ticket, cancellationToken);
+
+                    logger.LogInformation(
+                        "Worker produced classification candidate for ticket {TicketId}.",
+                        ticket.Id);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    // One bad ticket (or provider failure) must not stop the
+                    // worker or the remaining pending tickets.
+                    logger.LogError(ex, "Classification failed for ticket {TicketId}.", ticket.Id);
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

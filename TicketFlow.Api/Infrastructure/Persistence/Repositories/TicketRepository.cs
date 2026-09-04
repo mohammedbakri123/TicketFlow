@@ -102,16 +102,15 @@ public class TicketRepository(TicketFlowDbContext db, ILogger<TicketRepository> 
     }
 
     /// <summary>
-    /// Finds ids of pending tickets ordered by creation time and id.
+    /// Finds pending tickets ordered by creation time and id.
     /// </summary>
-    public async Task<IReadOnlyList<string>> GetPendingTicketIdsAsync(CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<Ticket>> GetPendingTicketsAsync(CancellationToken cancellationToken = default)
     {
         return await db.Tickets
             .AsNoTracking()
             .Where(t => t.Status == TicketStatus.Pending)
             .OrderBy(t => t.CreatedAt)
             .ThenBy(t => t.Id)
-            .Select(t => t.Id)
             .ToListAsync(cancellationToken);
     }
 }
