@@ -16,10 +16,12 @@ builder.Services.AddDbContext<TicketFlowDbContext>(options =>
     options.UseNpgsql(connectionString);
 });
 
+
 builder.Services.AddScoped<TicketService>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddProblemDetails();
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -28,6 +30,9 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 
 var app = builder.Build();
+
+app.UseExceptionHandler();
+app.UseStatusCodePages();
 
 if (app.Environment.IsDevelopment())
 {

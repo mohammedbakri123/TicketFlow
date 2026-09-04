@@ -1,11 +1,12 @@
 namespace TicketFlow.Api.Application.Tickets;
 
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using TicketFlow.Api.Domain.Tickets;
 using TicketFlow.Api.Infrastructure.Persistence;
 
-public class TicketService(TicketFlowDbContext db)
+public class TicketService(TicketFlowDbContext db, ILogger<TicketService> logger)
 {
     /// <summary>
     /// Persists a new pending ticket. Returns true when a new row was created,
@@ -16,34 +17,62 @@ public class TicketService(TicketFlowDbContext db)
     /// row, no second classification trigger). Any other database error
     /// propagates and results in a server error instead of a fake acceptance.
     /// </summary>
-    public async Task<bool> CreateAsync(Ticket ticket)
+    public async Task<bool> CreateAsync(Ticket ticket, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(ticket);
+
         db.Tickets.Add(ticket);
         try
         {
-            await db.SaveChangesAsync();
+            await db.SaveChangesAsync(cancellationToken);
             return true;
         }
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
             db.Entry(ticket).State = EntityState.Detached;
+            logger.LogInformation("Ticket submission with ID '{TicketId}' already exists. Treated as idempotent no-op.", ticket.Id);
             return false;
+        }
+        catch (Exception ex)
+        {
+            db.Entry(ticket).State = EntityState.Detached;
+            logger.LogError(ex, "Unexpected error occurred while creating ticket with ID '{TicketId}'.", ticket.Id);
+            throw;
         }
     }
 
     private static bool IsUniqueViolation(DbUpdateException ex) =>
-        ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
+        ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation }
+        || ex.GetBaseException() is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
 
-    public Task<Ticket?> GetByIdAsync(string id) =>
-        db.Tickets.AsNoTracking().FirstOrDefaultAsync(t => t.Id == id);
+    public Task<Ticket?> GetByIdAsync(string id, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return Task.FromResult<Ticket?>(null);
+        }
+
+        return db.Tickets.AsNoTracking().FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
+    }
 
     /// <summary>Filters and paginates tickets in the database query.</summary>
     public async Task<(IReadOnlyList<Ticket> Items, int Total)> ListAsync(
         TicketCategory? category,
         TicketPriority? priority,
         int page,
-        int pageSize)
+        int pageSize,
+        CancellationToken cancellationToken = default)
     {
+        if (page < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(page), "page must be greater than or equal to 1.");
+        }
+
+        if (pageSize < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(pageSize), "pageSize must be greater than or equal to 1.");
+        }
+
         var query = db.Tickets.AsNoTracking();
 
         if (category is not null)
@@ -56,14 +85,18 @@ public class TicketService(TicketFlowDbContext db)
             query = query.Where(t => t.Priority == priority);
         }
 
-        var total = await query.CountAsync();
+        var total = await query.CountAsync(cancellationToken);
+        if (total == 0)
+        {
+            return (Array.Empty<Ticket>(), 0);
+        }
 
         var items = await query
             .OrderBy(t => t.CreatedAt)
             .ThenBy(t => t.Id)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
 
         return (items, total);
     }
