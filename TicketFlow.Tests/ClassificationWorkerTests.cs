@@ -16,13 +16,18 @@ public class ClassificationWorkerTests
     /// <summary>Stub classifier that records the tickets it receives and can be told to fail for specific ids.</summary>
     private sealed class StubTicketClassifier : ITicketClassifier
     {
+        private readonly object gate = new();
+
         public List<Ticket> ClassifiedTickets { get; } = [];
 
         public HashSet<string> FailForTicketIds { get; } = new();
 
         public Task<ClassificationCandidate> ClassifyAsync(Ticket ticket, CancellationToken cancellationToken = default)
         {
-            ClassifiedTickets.Add(ticket);
+            lock (gate)
+            {
+                ClassifiedTickets.Add(ticket);
+            }
 
             if (FailForTicketIds.Contains(ticket.Id))
             {
@@ -36,6 +41,8 @@ public class ClassificationWorkerTests
 
     private sealed class TestLogger : ILogger<ClassificationWorker>
     {
+        private readonly object gate = new();
+
         public List<(LogLevel Level, string Message, Exception? Exception)> Entries { get; } = [];
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
@@ -48,7 +55,12 @@ public class ClassificationWorkerTests
             TState state,
             Exception? exception,
             Func<TState, Exception?, string> formatter)
-            => Entries.Add((logLevel, formatter(state, exception), exception));
+        {
+            lock (gate)
+            {
+                Entries.Add((logLevel, formatter(state, exception), exception));
+            }
+        }
     }
 
     // ---- Helpers ----
@@ -132,8 +144,11 @@ public class ClassificationWorkerTests
         // Must not throw even though the classifier throws for t-1001.
         await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
 
-        // The second ticket was still processed after the first one failed.
-        Assert.Equal(["t-1001", "t-1002"], classifier.ClassifiedTickets.Select(t => t.Id));
+        // Both tickets were processed; order is nondeterministic under
+        // bounded parallelism.
+        Assert.Equal(
+            new[] { "t-1001", "t-1002" },
+            classifier.ClassifiedTickets.Select(t => t.Id).Order());
 
         var error = Assert.Single(logger.Entries, e => e.Level == LogLevel.Error);
         Assert.Contains("t-1001", error.Message);
@@ -166,5 +181,60 @@ public class ClassificationWorkerTests
         Assert.Null(ticket.Category);
         Assert.Null(ticket.Priority);
         Assert.Null(ticket.Summary);
+    }
+
+    /// <summary>
+    /// Classifier that only completes a classification once all four tickets
+    /// are inside it at the same time. If the worker processed tickets
+    /// sequentially — or with a lower degree of parallelism than the four
+    /// seeded tickets — the barrier never opens and the stub times out,
+    /// failing the test deterministically instead of hanging.
+    /// </summary>
+    private sealed class BarrierClassifier : ITicketClassifier
+    {
+        private readonly TaskCompletionSource allEntered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private int entered;
+
+        public List<string> ProcessedTicketIds { get; } = [];
+
+        public async Task<ClassificationCandidate> ClassifyAsync(Ticket ticket, CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref entered) == 4)
+            {
+                allEntered.TrySetResult();
+            }
+
+            // Hold every in-flight classification open until all four are
+            // concurrently inside the classifier.
+            await allEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            lock (ProcessedTicketIds)
+            {
+                ProcessedTicketIds.Add(ticket.Id);
+            }
+
+            return new ClassificationCandidate("billing", "high", "s");
+        }
+    }
+
+    [Fact]
+    public async Task Scan_ProcessesPendingTicketsConcurrently()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new BarrierClassifier();
+        await SeedTicketsAsync(
+            scopeFactory,
+            new Ticket { Id = "t-1001", Subject = "s", Body = "b" },
+            new Ticket { Id = "t-1002", Subject = "s", Body = "b" },
+            new Ticket { Id = "t-1003", Subject = "s", Body = "b" },
+            new Ticket { Id = "t-1004", Subject = "s", Body = "b" });
+
+        await CreateWorker(scopeFactory, classifier, logger).ScanPendingTicketsAsync(CancellationToken.None);
+
+        // All four tickets were processed, which is only possible if the scan
+        // ran them concurrently (bounded by MaxDegreeOfParallelism = 4).
+        Assert.Equal(4, classifier.ProcessedTicketIds.Count);
     }
 }
