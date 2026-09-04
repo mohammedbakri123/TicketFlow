@@ -15,7 +15,7 @@ namespace TicketFlow.Api.Infrastructure.Persistence.Migrations
                 name: "tickets",
                 columns: table => new
                 {
-                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    Id = table.Column<string>(type: "text", nullable: false),
                     Subject = table.Column<string>(type: "character varying(255)", maxLength: 255, nullable: false),
                     Body = table.Column<string>(type: "text", nullable: false),
                     Status = table.Column<string>(type: "character varying(50)", maxLength: 50, nullable: false),

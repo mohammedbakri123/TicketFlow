@@ -24,9 +24,8 @@ namespace TicketFlow.Api.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("TicketFlow.Api.Domain.Tickets.Ticket", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
 
                     b.Property<int>("Attempts")
                         .ValueGeneratedOnAdd()

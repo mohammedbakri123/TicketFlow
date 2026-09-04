@@ -12,7 +12,7 @@ using TicketFlow.Api.Infrastructure.Persistence;
 namespace TicketFlow.Api.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(TicketFlowDbContext))]
-    [Migration("20260903214849_InitialCreate")]
+    [Migration("20260904120844_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -27,9 +27,8 @@ namespace TicketFlow.Api.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("TicketFlow.Api.Domain.Tickets.Ticket", b =>
                 {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
+                    b.Property<string>("Id")
+                        .HasColumnType("text");
 
                     b.Property<int>("Attempts")
                         .ValueGeneratedOnAdd()
