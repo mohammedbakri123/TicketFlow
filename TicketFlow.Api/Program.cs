@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
+using TicketFlow.Api.Application.Classification;
 using TicketFlow.Api.Application.Tickets;
 using TicketFlow.Api.Infrastructure.Persistence;
 
@@ -18,6 +19,12 @@ builder.Services.AddDbContext<TicketFlowDbContext>(options =>
 
 
 builder.Services.AddScoped<TicketService>();
+
+// Ticket classification runs in a BackgroundService inside this process.
+// The signal is a lightweight in-process wake-up; PostgreSQL remains the
+// source of truth (the worker re-scans pending tickets on startup).
+builder.Services.AddSingleton<ITicketWorkSignal, ChannelTicketWorkSignal>();
+builder.Services.AddHostedService<ClassificationWorker>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
