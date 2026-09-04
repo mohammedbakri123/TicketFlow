@@ -18,6 +18,9 @@ builder.Services.AddDbContext<TicketFlowDbContext>(options =>
 
 builder.Services.AddScoped<TicketService>();
 
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     // Serialize enums as camelCase strings, e.g. "pending", "billing", "high".
@@ -25,6 +28,12 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 
 var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
 
 app.MapTicketEndpoints();
 
