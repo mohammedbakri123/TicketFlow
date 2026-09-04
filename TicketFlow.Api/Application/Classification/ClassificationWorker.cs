@@ -52,21 +52,36 @@ public sealed class ClassificationWorker(
     /// </summary>
     internal async Task ScanPendingTicketsAsync(CancellationToken cancellationToken)
     {
+        IReadOnlyList<Ticket> pendingTickets;
+
         try
         {
             await using var scope = scopeFactory.CreateAsyncScope();
             var ticketRepository = scope.ServiceProvider.GetRequiredService<ITicketRepository>();
 
-            var pendingTickets = await ticketRepository.GetPendingTicketsAsync(cancellationToken);
+            pendingTickets = await ticketRepository.GetPendingTicketsAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            // A transient database failure must not crash the worker or the host.
+            logger.LogError(ex, "Worker failed to fetch pending tickets.");
+            return;
+        }
 
-            if (pendingTickets.Count == 0)
-            {
-                logger.LogDebug("Worker found no pending tickets.");
-                return;
-            }
+        if (pendingTickets.Count == 0)
+        {
+            logger.LogDebug("Worker found no pending tickets.");
+            return;
+        }
 
-            logger.LogInformation("Worker found {Count} pending tickets.", pendingTickets.Count);
+        logger.LogInformation("Worker found {Count} pending tickets.", pendingTickets.Count);
 
+        try
+        {
             // Process tickets concurrently with bounded parallelism. The
             // pending tickets were fetched with a single completed query on
             // one scoped DbContext; the per-ticket work below touches only
@@ -85,11 +100,6 @@ public sealed class ClassificationWorker(
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Expected during shutdown.
-        }
-        catch (Exception ex)
-        {
-            // A transient database failure must not crash the worker or the host.
-            logger.LogError(ex, "Worker failed to scan pending tickets.");
         }
     }
 
