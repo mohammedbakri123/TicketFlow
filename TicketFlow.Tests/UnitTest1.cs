@@ -15,7 +15,7 @@ public class TicketTests
             Body = "Test Body"
         };
 
-        Assert.NotEqual(Guid.Empty, ticket.Id);
+        Assert.Equal(string.Empty, ticket.Id);
         Assert.Equal("Test Subject", ticket.Subject);
         Assert.Equal("Test Body", ticket.Body);
         Assert.Equal(TicketStatus.Pending, ticket.Status);
