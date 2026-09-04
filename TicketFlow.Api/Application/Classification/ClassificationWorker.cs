@@ -22,6 +22,9 @@ public sealed class ClassificationWorker(
     ITicketClassifier classifier,
     ILogger<ClassificationWorker> logger) : BackgroundService
 {
+    /// <summary>Bounds concurrent classifications to keep provider load predictable.</summary>
+    private const int MaxDegreeOfParallelism = 4;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("Ticket classification worker started.");
@@ -61,33 +64,20 @@ public sealed class ClassificationWorker(
 
             logger.LogInformation("Worker found {Count} pending tickets.", pendingTickets.Count);
 
-            foreach (var ticket in pendingTickets)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                logger.LogInformation("Worker found pending ticket {TicketId}.", ticket.Id);
-
-                try
+            // Process tickets concurrently with bounded parallelism. The
+            // pending tickets were fetched with a single completed query on
+            // one scoped DbContext; the per-ticket work below touches only
+            // the classifier, so no DbContext is shared between parallel
+            // operations. (When persistence is added, each ticket will need
+            // its own scope — that belongs to the persistence step.)
+            await Parallel.ForEachAsync(
+                pendingTickets,
+                new ParallelOptions
                 {
-                    // Untrusted model output: received here, logged as produced,
-                    // never persisted in this step.
-                    _ = await classifier.ClassifyAsync(ticket, cancellationToken);
-
-                    logger.LogInformation(
-                        "Worker produced classification candidate for ticket {TicketId}.",
-                        ticket.Id);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    // One bad ticket (or provider failure) must not stop the
-                    // worker or the remaining pending tickets.
-                    logger.LogError(ex, "Classification failed for ticket {TicketId}.", ticket.Id);
-                }
-            }
+                    MaxDegreeOfParallelism = MaxDegreeOfParallelism,
+                    CancellationToken = cancellationToken
+                },
+                (ticket, token) => ProcessTicketAsync(ticket, token));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -97,6 +87,39 @@ public sealed class ClassificationWorker(
         {
             // A transient database failure must not crash the worker or the host.
             logger.LogError(ex, "Worker failed to scan pending tickets.");
+        }
+    }
+
+    /// <summary>
+    /// Unit of work for a single ticket: passes it to the classifier and logs
+    /// the result. Only ticket ids are logged — never ticket bodies or model
+    /// summaries, because ticket content is untrusted and may contain
+    /// sensitive customer data. A classifier failure for one ticket is logged
+    /// and does not stop the worker from processing the other tickets.
+    /// </summary>
+    private async ValueTask ProcessTicketAsync(Ticket ticket, CancellationToken cancellationToken)
+    {
+        logger.LogInformation("Worker found pending ticket {TicketId}.", ticket.Id);
+
+        try
+        {
+            // Untrusted model output: received here, logged as produced,
+            // never persisted in this step.
+            _ = await classifier.ClassifyAsync(ticket, cancellationToken);
+
+            logger.LogInformation(
+                "Worker produced classification candidate for ticket {TicketId}.",
+                ticket.Id);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // One bad ticket (or provider failure) must not stop the
+            // worker or the remaining pending tickets.
+            logger.LogError(ex, "Classification failed for ticket {TicketId}.", ticket.Id);
         }
     }
 }
