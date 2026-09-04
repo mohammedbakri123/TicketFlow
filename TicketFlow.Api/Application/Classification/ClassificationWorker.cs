@@ -1,9 +1,7 @@
 namespace TicketFlow.Api.Application.Classification;
 
-using Microsoft.EntityFrameworkCore;
 using TicketFlow.Api.Application.BackgroundWork;
 using TicketFlow.Api.Domain.Tickets;
-using TicketFlow.Api.Infrastructure.Persistence;
 
 /// <summary>
 /// Background worker for ticket classification. Runs in the same process as
@@ -44,15 +42,9 @@ public sealed class ClassificationWorker(
         try
         {
             await using var scope = scopeFactory.CreateAsyncScope();
-            var db = scope.ServiceProvider.GetRequiredService<TicketFlowDbContext>();
+            var ticketRepository = scope.ServiceProvider.GetRequiredService<ITicketRepository>();
 
-            var pendingIds = await db.Tickets
-                .AsNoTracking()
-                .Where(t => t.Status == TicketStatus.Pending)
-                .OrderBy(t => t.CreatedAt)
-                .ThenBy(t => t.Id)
-                .Select(t => t.Id)
-                .ToListAsync(cancellationToken);
+            var pendingIds = await ticketRepository.GetPendingTicketIdsAsync(cancellationToken);
 
             if (pendingIds.Count == 0)
             {

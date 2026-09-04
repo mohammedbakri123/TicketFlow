@@ -4,7 +4,9 @@ using Microsoft.EntityFrameworkCore;
 using TicketFlow.Api.Application.BackgroundWork;
 using TicketFlow.Api.Application.Classification;
 using TicketFlow.Api.Application.Tickets;
+using TicketFlow.Api.Domain.Tickets;
 using TicketFlow.Api.Infrastructure.Persistence;
+using TicketFlow.Api.Infrastructure.Persistence.Repositories;
 
 LoadEnv();
 
@@ -18,7 +20,7 @@ builder.Services.AddDbContext<TicketFlowDbContext>(options =>
     options.UseNpgsql(connectionString);
 });
 
-
+builder.Services.AddScoped<ITicketRepository, TicketRepository>();
 builder.Services.AddScoped<TicketService>();
 
 // Ticket classification runs in a BackgroundService inside this process.
