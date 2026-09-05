@@ -94,6 +94,28 @@ public class TicketClassificationValidatorTests
         Assert.Equal(summary, result.Classification!.Summary);
     }
 
+    [Fact]
+    public void SummaryAtMinLength_ReturnsValid()
+    {
+        var summary = new string('x', TicketClassificationValidator.MinSummaryLength);
+        var candidate = new ClassificationCandidate("billing", "high", summary);
+        var result = _validator.Validate(candidate);
+
+        Assert.True(result.IsValid);
+        Assert.Equal(summary, result.Classification!.Summary);
+    }
+
+    [Fact]
+    public void SummaryWithSurroundingWhitespace_ReturnsValidAndTrimmed()
+    {
+        var candidate = new ClassificationCandidate(
+            "billing", "high", "   Customer was charged twice.   ");
+        var result = _validator.Validate(candidate);
+
+        Assert.True(result.IsValid);
+        Assert.Equal("Customer was charged twice.", result.Classification!.Summary);
+    }
+
     // ---- Invalid category ----
 
     [Fact]
@@ -175,6 +197,28 @@ public class TicketClassificationValidatorTests
         Assert.False(result.IsValid);
         Assert.Null(result.Classification);
         Assert.Contains(result.Errors, e => e.Contains("Summary"));
+    }
+
+    [Fact]
+    public void SummaryShorterThanMinLength_ReturnsInvalid()
+    {
+        var candidate = new ClassificationCandidate("billing", "high", "Four");
+        var result = _validator.Validate(candidate);
+
+        Assert.False(result.IsValid);
+        Assert.Null(result.Classification);
+        Assert.Contains(result.Errors, e => e.Contains($"at least {TicketClassificationValidator.MinSummaryLength}"));
+    }
+
+    [Fact]
+    public void SummaryShorterThanMinLengthAfterTrim_ReturnsInvalid()
+    {
+        var candidate = new ClassificationCandidate("billing", "high", "   Hi   ");
+        var result = _validator.Validate(candidate);
+
+        Assert.False(result.IsValid);
+        Assert.Null(result.Classification);
+        Assert.Contains(result.Errors, e => e.Contains($"at least {TicketClassificationValidator.MinSummaryLength}"));
     }
 
     [Fact]

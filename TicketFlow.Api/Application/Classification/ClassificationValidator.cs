@@ -17,11 +17,18 @@ public interface ITicketClassificationValidator
 /// Category and priority are matched against explicit allow-lists (not
 /// <see cref="Enum.TryParse{TEnum}(string?, out TEnum)"/>, which would
 /// accept numeric strings and future enum members). Summary is checked for
-/// presence, whitespace, and length only — semantic quality is not a
-/// deterministic check.
+/// structure and hygiene only (presence, minimum/maximum length, and whitespace trimming) —
+/// deterministic validation does not verify semantic faithfulness or whether the summary
+/// accurately represents the ticket.
 /// </summary>
 public sealed class TicketClassificationValidator : ITicketClassificationValidator
 {
+    /// <summary>
+    /// Summary must be at least this many characters as a basic hygiene check.
+    /// This is only structural/hygiene validation, not semantic validation.
+    /// </summary>
+    internal const int MinSummaryLength = 5;
+
     /// <summary>
     /// Summary must be at most this many characters. Aligned with the
     /// database column constraint (1000 chars).
@@ -93,13 +100,21 @@ public sealed class TicketClassificationValidator : ITicketClassificationValidat
         {
             errors.Add("Summary is required and must not be empty or whitespace.");
         }
-        else if (candidate.Summary.Length > MaxSummaryLength)
-        {
-            errors.Add($"Summary exceeds the maximum length of {MaxSummaryLength} characters.");
-        }
         else
         {
-            summary = candidate.Summary;
+            var trimmed = candidate.Summary.Trim();
+            if (trimmed.Length < MinSummaryLength)
+            {
+                errors.Add($"Summary must be at least {MinSummaryLength} characters.");
+            }
+            else if (trimmed.Length > MaxSummaryLength)
+            {
+                errors.Add($"Summary exceeds the maximum length of {MaxSummaryLength} characters.");
+            }
+            else
+            {
+                summary = trimmed;
+            }
         }
 
         // ---- Result ----
