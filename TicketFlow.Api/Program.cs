@@ -10,6 +10,13 @@ using TicketFlow.Api.Infrastructure.Persistence.Repositories;
 
 LoadEnv();
 
+if (args.Contains("--load-samples"))
+{
+    var exitCode = await SampleDataLoader.LoadAsync(args);
+    Environment.Exit(exitCode);
+    return;
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 var connectionString = builder.Configuration["DATABASE_CONNECTION_STRING"]

@@ -4,32 +4,39 @@ TicketFlow is an asynchronous ticket classification service built for the Loura 
 
 ---
 
-## 1. Running Locally (Clean Clone)
+## 1. Running Locally
 
 ### Prerequisites
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
-- PostgreSQL (local instance or Docker)
+- Docker (for PostgreSQL)
 
-### Quick Start (3 Steps)
+### Clean-Clone Setup
 
-1. **Start PostgreSQL** (skip if you already have a local instance running):
+1. **Clone the repository**:
+   ```bash
+   git clone <repo-url>
+   cd TicketFlow
+   ```
+
+2. **Start PostgreSQL**:
    ```bash
    docker compose up -d
    ```
+   Docker Compose starts a PostgreSQL 17 instance. The credentials and database name (`ticketflow`, `postgres`/`postgres`) match `.env.example`.
 
-2. **Configure environment**:
+3. **Copy the environment file**:
    ```bash
    cp .env.example .env
    ```
-   > **Offline by default**: `.env.example` is configured with `AI_PROVIDER=fake`, allowing the service to run completely offline without an external API key or network access. To use Google Gemini, set `AI_PROVIDER=gemini` and provide your `GEMINI_API_KEY`.
+   The configuration defaults to `AI_PROVIDER=fake`, allowing the service to run out of the box with zero setup and no API key. Using Google Gemini is optional (set `AI_PROVIDER=gemini` and supply `GEMINI_API_KEY`).
 
-3. **Start the service**:
+4. **Start the API**:
    ```bash
    dotnet run --project TicketFlow.Api
    ```
-   *(Pending EF Core database migrations are automatically applied on startup. Alternatively, you can run `dotnet ef database update --project TicketFlow.Api` manually beforehand).*
+   Entity Framework Core migrations are applied automatically when the application starts—no manual database, user, or table creation is needed.
 
-The API listens on **`http://localhost:5024`** (Swagger UI is available at `http://localhost:5024/swagger`).
+The API listens on **`http://localhost:5024`** (Swagger UI: `http://localhost:5024/swagger`).
 
 ---
 
@@ -42,7 +49,7 @@ The API listens on **`http://localhost:5024`** (Swagger UI is available at `http
      -d '{
        "id": "t-1001",
        "subject": "Charged twice this month",
-       "body": "Hi, I see two charges of 49.00 on my card statement dated the 3rd and the 4th. Can you refund one of them?"
+       "body": "Hi, I see two charges of 49.00 on my card statement dated the 3rd and the 4th. I only have one subscription. Can you refund one of them?"
      }'
    ```
    **Response (`202 Accepted`)**:
@@ -79,12 +86,13 @@ The API listens on **`http://localhost:5024`** (Swagger UI is available at `http
 
 The 10 sample tickets from the assignment appendix are provided in `sample-tickets.json`.
 
-While the service is running, load all 10 tickets with one command:
+While the service is running, load all 10 tickets using the .NET CLI:
 ```bash
-./scripts/load-samples.sh
+dotnet run --project TicketFlow.Api -- --load-samples
 ```
+This submits the 10 appendix tickets through the normal `POST /tickets` HTTP endpoint.
 
-Query the list endpoint to view the results:
+You can then query the list endpoint to view the results:
 ```bash
 curl "http://localhost:5024/tickets?pageSize=50"
 ```
