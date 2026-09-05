@@ -18,16 +18,36 @@ using TicketFlow.Api.Domain.Tickets;
 /// (due to classifier exceptions or invalid candidates), Attempts is incremented;
 /// if Attempts reaches 3, the ticket transitions to Failed, otherwise it remains
 /// Pending for future scan/retry.
+/// When pending tickets remain after a scan, the worker automatically re-scans after
+/// <see cref="RetryInterval"/> or immediately when a new work signal is received.
+/// When no pending tickets remain, the worker waits indefinitely for a signal.
 /// </summary>
 public sealed class ClassificationWorker(
     IServiceScopeFactory scopeFactory,
     ITicketWorkSignal workSignal,
     ITicketClassifier classifier,
     ITicketClassificationValidator validator,
-    ILogger<ClassificationWorker> logger) : BackgroundService
+    ILogger<ClassificationWorker> logger,
+    TimeSpan retryInterval)
+    : BackgroundService
 {
     /// <summary>Bounds concurrent classifications to keep provider load predictable.</summary>
     private const int MaxDegreeOfParallelism = 4;
+
+    /// <summary>Default retry interval when pending tickets remain after a scan.</summary>
+    public static readonly TimeSpan DefaultRetryInterval = TimeSpan.FromSeconds(5);
+
+    public ClassificationWorker(
+        IServiceScopeFactory scopeFactory,
+        ITicketWorkSignal workSignal,
+        ITicketClassifier classifier,
+        ITicketClassificationValidator validator,
+        ILogger<ClassificationWorker> logger)
+        : this(scopeFactory, workSignal, classifier, validator, logger, DefaultRetryInterval)
+    {
+    }
+
+    public TimeSpan RetryInterval => retryInterval;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -35,12 +55,31 @@ public sealed class ClassificationWorker(
 
         // Run this once on startup to recover any pending tickets that were
         // persisted before a crash or restart, even if their signal was lost.
-        await ScanPendingTicketsAsync(stoppingToken);
+        var hasPendingTickets = await ScanPendingTicketsAsync(stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            await workSignal.WaitForSignalAsync(stoppingToken);
-            await ScanPendingTicketsAsync(stoppingToken);
+            if (hasPendingTickets)
+            {
+                using var timeoutCts = new CancellationTokenSource(retryInterval);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, timeoutCts.Token);
+
+                try
+                {
+                    await workSignal.WaitForSignalAsync(linkedCts.Token);
+                }
+                catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !stoppingToken.IsCancellationRequested)
+                {
+                    // RetryInterval elapsed without a signal; proceed with retry scan.
+                }
+            }
+            else
+            {
+                // No pending tickets in progress; wait indefinitely for a new work signal.
+                await workSignal.WaitForSignalAsync(stoppingToken);
+            }
+
+            hasPendingTickets = await ScanPendingTicketsAsync(stoppingToken);
         }
     }
 
@@ -50,8 +89,9 @@ public sealed class ClassificationWorker(
     /// ticket content is untrusted and may contain sensitive customer data.
     /// A classifier failure for one ticket is logged and does not stop the
     /// worker from processing the remaining tickets.
+    /// Returns true if any tickets remain in Pending status after the scan; otherwise false.
     /// </summary>
-    internal async Task ScanPendingTicketsAsync(CancellationToken cancellationToken)
+    internal async Task<bool> ScanPendingTicketsAsync(CancellationToken cancellationToken)
     {
         IReadOnlyList<Ticket> pendingTickets;
 
@@ -64,22 +104,24 @@ public sealed class ClassificationWorker(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return;
+            return false;
         }
         catch (Exception ex)
         {
             // A transient database failure must not crash the worker or the host.
             logger.LogError(ex, "Worker failed to fetch pending tickets.");
-            return;
+            return true;
         }
 
         if (pendingTickets.Count == 0)
         {
             logger.LogDebug("Worker found no pending tickets.");
-            return;
+            return false;
         }
 
         logger.LogInformation("Worker found {Count} pending tickets.", pendingTickets.Count);
+
+        var pendingRemaining = 0;
 
         try
         {
@@ -95,12 +137,22 @@ public sealed class ClassificationWorker(
                     MaxDegreeOfParallelism = MaxDegreeOfParallelism,
                     CancellationToken = cancellationToken
                 },
-                (ticket, token) => ProcessTicketAsync(ticket, token));
+                async (ticket, token) =>
+                {
+                    var stillPending = await ProcessTicketAsync(ticket, token);
+                    if (stillPending)
+                    {
+                        Interlocked.Increment(ref pendingRemaining);
+                    }
+                });
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Expected during shutdown.
+            return false;
         }
+
+        return pendingRemaining > 0;
     }
 
     /// <summary>
@@ -108,8 +160,10 @@ public sealed class ClassificationWorker(
     /// and persists either the trusted classification or records an attempt failure.
     /// Each parallel operation creates a dedicated async DI scope for its repository/DbContext.
     /// Only ticket ids and non-sensitive statuses are logged — never ticket bodies or model summaries.
+    /// Returns true if the ticket remains in Pending status after processing; false if it transitioned
+    /// to Classified or Failed.
     /// </summary>
-    private async ValueTask ProcessTicketAsync(Ticket ticket, CancellationToken cancellationToken)
+    private async ValueTask<bool> ProcessTicketAsync(Ticket ticket, CancellationToken cancellationToken)
     {
         logger.LogInformation("Worker found pending ticket {TicketId}.", ticket.Id);
 
@@ -148,6 +202,7 @@ public sealed class ClassificationWorker(
                     ticket.Id);
 
                 await ticketRepository.SaveClassificationAsync(ticket.Id, result.Classification, cancellationToken);
+                return false;
             }
             else
             {
@@ -160,6 +215,7 @@ public sealed class ClassificationWorker(
                 }
 
                 await ticketRepository.RecordClassificationFailureAsync(ticket.Id, cancellationToken);
+                return ticket.Attempts + 1 < 3;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -171,6 +227,7 @@ public sealed class ClassificationWorker(
             // One bad ticket or unexpected persistence failure must not stop the
             // worker or the remaining pending tickets.
             logger.LogError(ex, "Failed to process ticket {TicketId}.", ticket.Id);
+            return true;
         }
     }
 }

@@ -45,6 +45,24 @@ public class ClassificationWorkerTests
             => Task.FromResult(candidate);
     }
 
+    private sealed class FlakyTicketClassifier(int failFirstNCalls = 1) : ITicketClassifier
+    {
+        private int _calls;
+        public int Calls => _calls;
+
+        public Task<ClassificationCandidate> ClassifyAsync(Ticket ticket, CancellationToken cancellationToken = default)
+        {
+            var call = Interlocked.Increment(ref _calls);
+            if (call <= failFirstNCalls)
+            {
+                throw new InvalidOperationException("Simulated transient error.");
+            }
+
+            return Task.FromResult(new ClassificationCandidate(
+                "billing", "high", "The customer reports being charged twice."));
+        }
+    }
+
     private sealed class TestLogger : ILogger<ClassificationWorker>
     {
         private readonly object gate = new();
@@ -91,9 +109,16 @@ public class ClassificationWorkerTests
         IServiceScopeFactory scopeFactory,
         ITicketClassifier classifier,
         TestLogger logger,
-        ITicketClassificationValidator? validator = null)
-        => new(scopeFactory, new ChannelTicketWorkSignal(), classifier,
-               validator ?? new TicketClassificationValidator(), logger);
+        ITicketClassificationValidator? validator = null,
+        ITicketWorkSignal? workSignal = null,
+        TimeSpan? retryInterval = null)
+    {
+        var signal = workSignal ?? new ChannelTicketWorkSignal();
+        var val = validator ?? new TicketClassificationValidator();
+        return retryInterval.HasValue
+            ? new ClassificationWorker(scopeFactory, signal, classifier, val, logger, retryInterval.Value)
+            : new ClassificationWorker(scopeFactory, signal, classifier, val, logger);
+    }
 
     private static async Task SeedTicketsAsync(IServiceScopeFactory scopeFactory, params Ticket[] tickets)
     {
@@ -430,5 +455,248 @@ public class ClassificationWorkerTests
         Assert.Equal(TicketPriority.High, ticket.Priority);
         Assert.Equal("Original Summary", ticket.Summary);
         Assert.Equal(1, ticket.Attempts);
+    }
+
+    // ---- Automatic Retry and Timing Tests ----
+
+    [Fact]
+    public async Task Scan_ReturnsTrue_WhenTicketsRemainPendingAfterFailure()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new FakeTicketClassifier(FakeClassifierMode.InvalidCategory);
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 0 });
+
+        var worker = CreateWorker(scopeFactory, classifier, logger);
+        var hasPending = await worker.ScanPendingTicketsAsync(CancellationToken.None);
+
+        Assert.True(hasPending);
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Pending, ticket.Status);
+        Assert.Equal(1, ticket.Attempts);
+    }
+
+    [Fact]
+    public async Task Scan_ReturnsFalse_WhenAllTicketsClassifiedOrFailed()
+    {
+        var (scopeFactory, classifier, logger) = CreateWorkerDependencies();
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 0 });
+
+        var worker = CreateWorker(scopeFactory, classifier, logger);
+        var hasPending = await worker.ScanPendingTicketsAsync(CancellationToken.None);
+
+        Assert.False(hasPending);
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Classified, ticket.Status);
+    }
+
+    [Fact]
+    public async Task Scan_ReturnsFalse_WhenFailedTicketReachesThreeAttempts()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new FakeTicketClassifier(FakeClassifierMode.InvalidCategory);
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-1001", Subject = "s", Body = "b", Attempts = 2, Status = TicketStatus.Pending });
+
+        var worker = CreateWorker(scopeFactory, classifier, logger);
+        var hasPending = await worker.ScanPendingTicketsAsync(CancellationToken.None);
+
+        Assert.False(hasPending);
+        var ticket = await GetTicketAsync(scopeFactory, "t-1001");
+        Assert.Equal(TicketStatus.Failed, ticket.Status);
+        Assert.Equal(3, ticket.Attempts);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_AutomaticallyRetriesPendingTicket_AfterRetryInterval()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var flakyClassifier = new FlakyTicketClassifier(failFirstNCalls: 1);
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-retry", Subject = "s", Body = "b", Attempts = 0 });
+
+        var worker = CreateWorker(
+            scopeFactory,
+            flakyClassifier,
+            logger,
+            retryInterval: TimeSpan.FromMilliseconds(50));
+
+        using var cts = new CancellationTokenSource();
+        await worker.StartAsync(cts.Token);
+
+        // Wait for the automatic retry to run and classify the ticket without any external signal
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        Ticket? ticket = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            ticket = await GetTicketAsync(scopeFactory, "t-retry");
+            if (ticket.Status == TicketStatus.Classified)
+            {
+                break;
+            }
+            await Task.Delay(20);
+        }
+
+        await worker.StopAsync(CancellationToken.None);
+
+        Assert.NotNull(ticket);
+        Assert.Equal(TicketStatus.Classified, ticket.Status);
+        Assert.Equal(2, ticket.Attempts);
+        Assert.Equal(2, flakyClassifier.Calls);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_NewSignal_WakesWorkerImmediatelyBeforeRetryInterval()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var flakyClassifier = new FlakyTicketClassifier(failFirstNCalls: 1);
+        var workSignal = new ChannelTicketWorkSignal();
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-sig", Subject = "s", Body = "b", Attempts = 0 });
+
+        // Long retry interval so we can prove the worker woke up due to signal, not timer
+        var worker = CreateWorker(
+            scopeFactory,
+            flakyClassifier,
+            logger,
+            workSignal: workSignal,
+            retryInterval: TimeSpan.FromSeconds(30));
+
+        using var cts = new CancellationTokenSource();
+        await worker.StartAsync(cts.Token);
+
+        // Wait until first attempt fails
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        Ticket? ticket = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            ticket = await GetTicketAsync(scopeFactory, "t-sig");
+            if (ticket.Attempts == 1)
+            {
+                break;
+            }
+            await Task.Delay(20);
+        }
+
+        Assert.NotNull(ticket);
+        Assert.Equal(1, ticket.Attempts);
+        Assert.Equal(TicketStatus.Pending, ticket.Status);
+
+        // Now signal new work: worker should wake up immediately and classify
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        workSignal.Signal();
+
+        while (DateTime.UtcNow < deadline)
+        {
+            ticket = await GetTicketAsync(scopeFactory, "t-sig");
+            if (ticket.Status == TicketStatus.Classified)
+            {
+                break;
+            }
+            await Task.Delay(20);
+        }
+        sw.Stop();
+
+        await worker.StopAsync(CancellationToken.None);
+
+        Assert.NotNull(ticket);
+        Assert.Equal(TicketStatus.Classified, ticket.Status);
+        Assert.Equal(2, ticket.Attempts);
+        // Completed long before the 30-second timer
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_NoPendingTickets_WaitsIndefinitelyForSignal()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new StubTicketClassifier();
+        var workSignal = new ChannelTicketWorkSignal();
+
+        var worker = CreateWorker(
+            scopeFactory,
+            classifier,
+            logger,
+            workSignal: workSignal,
+            retryInterval: TimeSpan.FromMilliseconds(50));
+
+        using var cts = new CancellationTokenSource();
+        await worker.StartAsync(cts.Token);
+
+        // Initially no tickets; classifier should not be called
+        await Task.Delay(100);
+        Assert.Empty(classifier.ClassifiedTickets);
+
+        // When a ticket is seeded and signal sent, it wakes and processes
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-idle", Subject = "s", Body = "b", Attempts = 0 });
+        workSignal.Signal();
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        Ticket? ticket = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            ticket = await GetTicketAsync(scopeFactory, "t-idle");
+            if (ticket.Status == TicketStatus.Classified)
+            {
+                break;
+            }
+            await Task.Delay(20);
+        }
+
+        await worker.StopAsync(CancellationToken.None);
+
+        Assert.NotNull(ticket);
+        Assert.Equal(TicketStatus.Classified, ticket.Status);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RepeatedFailures_TransitionToFailedAfterThreeAttempts()
+    {
+        var (scopeFactory, _, logger) = CreateWorkerDependencies();
+        var classifier = new FakeTicketClassifier(FakeClassifierMode.Throw);
+        await SeedTicketsAsync(scopeFactory, new Ticket { Id = "t-fail3", Subject = "s", Body = "b", Attempts = 0 });
+
+        var worker = CreateWorker(
+            scopeFactory,
+            classifier,
+            logger,
+            retryInterval: TimeSpan.FromMilliseconds(30));
+
+        using var cts = new CancellationTokenSource();
+        await worker.StartAsync(cts.Token);
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        Ticket? ticket = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            ticket = await GetTicketAsync(scopeFactory, "t-fail3");
+            if (ticket.Status == TicketStatus.Failed)
+            {
+                break;
+            }
+            await Task.Delay(20);
+        }
+
+        await worker.StopAsync(CancellationToken.None);
+
+        Assert.NotNull(ticket);
+        Assert.Equal(TicketStatus.Failed, ticket.Status);
+        Assert.Equal(3, ticket.Attempts);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_GracefulShutdown_OnCancellation()
+    {
+        var (scopeFactory, classifier, logger) = CreateWorkerDependencies();
+        var worker = CreateWorker(
+            scopeFactory,
+            classifier,
+            logger,
+            retryInterval: TimeSpan.FromMilliseconds(50));
+
+        using var cts = new CancellationTokenSource();
+        await worker.StartAsync(cts.Token);
+
+        // Cancel during wait
+        cts.Cancel();
+        await worker.StopAsync(CancellationToken.None);
+
+        // No unhandled exception should occur
     }
 }

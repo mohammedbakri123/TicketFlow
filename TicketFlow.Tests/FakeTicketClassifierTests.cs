@@ -80,4 +80,36 @@ public class FakeTicketClassifierTests
         // Same mode always yields the same output, regardless of the ticket.
         Assert.Equal(first, second);
     }
+
+    [Fact]
+    public void DefaultConstructor_DefaultsToRandomMode()
+    {
+        var classifier = new FakeTicketClassifier();
+        Assert.Equal(FakeClassifierMode.Random, classifier.Mode);
+    }
+
+    [Fact]
+    public async Task Random_ProducesVariedBehaviorsAcrossCalls()
+    {
+        var classifier = new FakeTicketClassifier(FakeClassifierMode.Random);
+        var ticket = new Ticket { Id = "t-1001", Subject = "s", Body = "b" };
+        var outcomes = new HashSet<string>();
+
+        // Run multiple iterations to observe random behaviors (including exceptions).
+        for (var i = 0; i < 50; i++)
+        {
+            try
+            {
+                var candidate = await classifier.ClassifyAsync(ticket);
+                outcomes.Add($"{candidate.Category}|{candidate.Priority}|{candidate.Summary}");
+            }
+            catch (InvalidOperationException)
+            {
+                outcomes.Add("THROW");
+            }
+        }
+
+        // Over 50 runs across 6 behaviors, we should observe multiple distinct outcomes.
+        Assert.True(outcomes.Count > 1);
+    }
 }
