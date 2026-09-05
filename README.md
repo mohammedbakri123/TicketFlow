@@ -153,6 +153,6 @@ dotnet test
 
 ## 7. With More Time
 
-1. **Distributed Queue / Outbox Pattern**: Replace the in-process Channel with a distributed broker (e.g., RabbitMQ or AWS SQS) or a transactional outbox with `FOR UPDATE SKIP LOCKED` to support horizontal scaling across multiple worker replicas without duplicate processing.
-2. **Rate-Limit & Backoff Resilience**: Implement exponential backoff and jitter, extracting `Retry-After` metadata from provider 429 responses to gracefully handle provider rate limits.
-3. **Re-classification Endpoint**: Add an administrative endpoint (`POST /tickets/{id}/reclassify`) to re-queue tickets that failed due to transient outages or that need re-classification following a prompt or taxonomy update.
+- **Stronger prompt-injection resistance:** Expand safeguards and test against a broader set of adversarial ticket content.
+- **Stronger summary validation:** Validate that generated summaries are concise, single-sentence, and representative of the ticket.
+- **Retry resilience:** Replace the fixed retry interval with exponential backoff and jitter.
