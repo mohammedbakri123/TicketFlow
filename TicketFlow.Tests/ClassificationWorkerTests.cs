@@ -699,4 +699,65 @@ public class ClassificationWorkerTests
 
         // No unhandled exception should occur
     }
+
+    [Fact]
+    public async Task ExecuteAsync_ReclassifiedTicket_WakesWorkerAndClassifiesSuccessfully()
+    {
+        var (scopeFactory, classifier, logger) = CreateWorkerDependencies();
+        var workSignal = new ChannelTicketWorkSignal();
+        var initialTicket = new Ticket
+        {
+            Id = "t-reclass-worker",
+            Subject = "Double charge",
+            Body = "Refund please",
+            Status = TicketStatus.Classified,
+            Category = TicketCategory.Billing,
+            Priority = TicketPriority.High,
+            Summary = "Customer was double charged.",
+            Attempts = 1
+        };
+        await SeedTicketsAsync(scopeFactory, initialTicket);
+
+        var worker = CreateWorker(
+            scopeFactory,
+            classifier,
+            logger,
+            workSignal: workSignal,
+            retryInterval: TimeSpan.FromSeconds(30));
+
+        using var cts = new CancellationTokenSource();
+        await worker.StartAsync(cts.Token);
+
+        // Reclassify the ticket
+        using (var scope = scopeFactory.CreateScope())
+        {
+            var repo = scope.ServiceProvider.GetRequiredService<ITicketRepository>();
+            var result = await repo.ReclassifyAsync("t-reclass-worker");
+            Assert.Equal(ReclassifyTicketResult.Requeued, result);
+        }
+
+        // Signal worker
+        workSignal.Signal();
+
+        // Wait for worker to reclassify
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        Ticket? ticket = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            ticket = await GetTicketAsync(scopeFactory, "t-reclass-worker");
+            if (ticket.Status == TicketStatus.Classified && ticket.Attempts == 1)
+            {
+                break;
+            }
+            await Task.Delay(20);
+        }
+
+        await worker.StopAsync(CancellationToken.None);
+
+        Assert.NotNull(ticket);
+        Assert.Equal(TicketStatus.Classified, ticket.Status);
+        Assert.Equal(1, ticket.Attempts);
+        Assert.Equal(TicketCategory.Billing, ticket.Category);
+        Assert.Equal(TicketPriority.High, ticket.Priority);
+    }
 }
