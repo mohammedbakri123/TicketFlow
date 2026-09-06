@@ -1,163 +1,203 @@
 # TicketFlow
 
-TicketFlow is an asynchronous ticket classification service built for the Loura engineering take-home assignment. It ingests customer support tickets over HTTP, stores them in PostgreSQL with a `pending` status, classifies them in the background using an LLM, and exposes endpoints to retrieve and list classified tickets.
-
----
+TicketFlow is a small asynchronous support-ticket classification service built for the Loura engineering take-home. It accepts tickets over HTTP, stores them in PostgreSQL, classifies them in the background, and exposes the results through the API.
 
 ## 1. Running Locally
 
 ### Prerequisites
+
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
-- Docker (for PostgreSQL)
+- Docker
 
-### Clean-Clone Setup
+### Clean-clone setup
 
-1. **Clone the repository**:
-   ```bash
-   git clone <repo-url>
-   cd TicketFlow
-   ```
+```bash
+git clone <repo-url>
+cd TicketFlow
+docker compose up -d
+cp .env.example .env
+dotnet run --project TicketFlow.Api
+```
 
-2. **Start PostgreSQL**:
-   ```bash
-   docker compose up -d
-   ```
-   Docker Compose starts a PostgreSQL 17 instance. The credentials and database name (`ticketflow`, `postgres`/`postgres`) match `.env.example`.
+PostgreSQL is created by Docker Compose, and EF Core applies pending migrations automatically on startup.
 
-3. **Copy the environment file**:
-   ```bash
-   cp .env.example .env
-   ```
-   The configuration defaults to `AI_PROVIDER=fake`, allowing the service to run out of the box with zero setup and no API key. Using Google Gemini is optional (set `AI_PROVIDER=gemini` and supply `GEMINI_API_KEY`).
+The default configuration uses the fake classifier, so no API key or external model service is required. Gemini is optional:
 
-4. **Start the API**:
-   ```bash
-   dotnet run --project TicketFlow.Api
-   ```
-   Entity Framework Core migrations are applied automatically when the application starts—no manual database, user, or table creation is needed.
+```env
+AI_PROVIDER=gemini
+GEMINI_API_KEY=your-key
+AI_MODEL=gemini-2.5-flash
+```
 
-The API listens on **`http://localhost:5024`** (Swagger UI: `http://localhost:5024/swagger`).
+The API listens on `http://localhost:5024` and Swagger is available at `/swagger`.
 
----
+### Example
 
-### Ingest & Verify a Ticket
+Create a ticket:
 
-1. **Submit a ticket**:
-   ```bash
-   curl -X POST http://localhost:5024/tickets \
-     -H "Content-Type: application/json" \
-     -d '{
-       "id": "t-1001",
-       "subject": "Charged twice this month",
-       "body": "Hi, I see two charges of 49.00 on my card statement dated the 3rd and the 4th. I only have one subscription. Can you refund one of them?"
-     }'
-   ```
-   **Response (`202 Accepted`)**:
-   ```json
-   {
-     "id": "t-1001",
-     "status": "pending"
-   }
-   ```
+```bash
+curl -X POST http://localhost:5024/tickets \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "t-1001",
+    "subject": "Charged twice this month",
+    "body": "I see two charges for the same subscription and would like one refunded."
+  }'
+```
 
-2. **Retrieve the ticket and observe classification**:
-   ```bash
-   curl http://localhost:5024/tickets/t-1001
-   ```
-   **Response (after background classification completes)**:
-   ```json
-   {
-     "id": "t-1001",
-     "subject": "Charged twice this month",
-     "body": "Hi, I see two charges of 49.00 on my card statement dated the 3rd and the 4th. Can you refund one of them?",
-     "status": "classified",
-     "category": "billing",
-     "priority": "high",
-     "summary": "Customer was charged twice for their subscription and requests a refund.",
-     "attempts": 1,
-     "createdAt": "2026-09-05T20:00:00Z",
-     "updatedAt": "2026-09-05T20:00:02Z"
-   }
-   ```
+The endpoint returns `202 Accepted` because classification is asynchronous:
 
----
+```json
+{
+  "id": "t-1001",
+  "status": "pending"
+}
+```
+
+Then fetch the ticket:
+
+```bash
+curl http://localhost:5024/tickets/t-1001
+```
+
+The ticket eventually becomes `classified` or `failed`:
+
+```json
+{
+  "id": "t-1001",
+  "subject": "Charged twice this month",
+  "body": "I see two charges for the same subscription and would like one refunded.",
+  "status": "classified",
+  "category": "billing",
+  "priority": "high",
+  "summary": "Customer was charged twice for their subscription and requests a refund.",
+  "attempts": 1,
+  "createdAt": "2026-09-05T20:00:00Z",
+  "updatedAt": "2026-09-05T20:00:02Z"
+}
+```
 
 ## 2. Loading Sample Tickets
 
-The 10 sample tickets from the assignment appendix are provided in `sample-tickets.json`.
+The ten appendix tickets are included in `sample-tickets.json`.
 
-While the service is running, load all 10 tickets using the .NET CLI:
+With the API already running:
+
 ```bash
 dotnet run --project TicketFlow.Api -- --load-samples
 ```
-This submits the 10 appendix tickets through the normal `POST /tickets` HTTP endpoint.
 
-You can then query the list endpoint to view the results:
+The loader submits the samples through the normal `POST /tickets` endpoint.
+
+You can inspect them with:
+
 ```bash
 curl "http://localhost:5024/tickets?pageSize=50"
 ```
 
----
+The list endpoint supports `status`, `category`, and `priority` filters plus pagination.
 
 ## 3. Design Decisions
 
-- **Storage**: PostgreSQL via Entity Framework Core. Relational persistence provides ACID durability for tickets and status transitions. The primary key on `tickets.Id` acts as the definitive uniqueness constraint: duplicate submissions lose the database race, are caught as unique constraint violations, and are treated as idempotent no-ops without re-running classification.
-- **Asynchronous Work**: An in-process `BackgroundService` (`ClassificationWorker`) paired with an in-memory `System.Threading.Channels` signal (`ChannelTicketWorkSignal`). The ingestion endpoint writes the ticket with status `pending`, signals the channel, and returns `202 Accepted` immediately. The HTTP request never invokes the model.
-- **Concurrency**: Bounded parallelism (`MaxDegreeOfParallelism = 4`) using `Parallel.ForEachAsync`. Each parallel classification executes within its own async dependency injection scope and `DbContext` instance, avoiding shared entity tracking issues and keeping provider connection load predictable.
-- **Restart Behavior**: PostgreSQL is the durable source of truth. On startup, `ClassificationWorker` executes an initial recovery query for all tickets in `pending` status. Any in-flight work interrupted by a crash or restart is picked up and processed even if its in-memory signal was lost.
-- **Retry Policy & Failure Handling**: Up to 3 attempts. When a classification fails—due to provider network timeouts, rate limits (HTTP 429), unparseable JSON, or schema validation failures—the worker increments `attempts` and leaves the ticket `pending` for retry on a 5-second interval. Once `attempts` reaches 3, the ticket transitions to `failed`. Malformed or unvalidated model outputs are never persisted.
-- **Prompt Injection & Untrusted Content**: Prompts use structural role isolation (`ChatRole.System` vs `ChatRole.User`) and XML boundary tags (`<ticket-subject>` and `<ticket-body>`) to separate untrusted customer data from system instructions. System instructions explicitly command the model to ignore roleplay or prompt overrides inside ticket content. Crucially, the model is given no executable tools or functions (`Tools = null`), and all outputs must satisfy server-side validation allow-lists.
-- **API Shape**:
-  - `POST /tickets`: Accepts `{ id, subject, body }`, validates presence and field lengths, persists as `pending`, and returns `202 Accepted` with a `Location` header. Duplicate IDs are accepted as idempotent no-ops.
-  - `GET /tickets/{id}`: Returns `200 OK` with full ticket details, or `404 Not Found`.
-  - `GET /tickets`: Returns paginated ticket summaries (`page`, `pageSize`, `total`), filterable by `status`, `category`, and `priority`. Validation failures return standard RFC 7807 problem details.
-  - `POST /tickets/{id}/reclassify`: Re-queues a Classified or Failed ticket for asynchronous classification by resetting it to Pending and returning `202 Accepted`. Returns `404` if the ticket does not exist and `409` if it is already Pending.
+### Storage
 
-  Ticket bodies are limited to 100,000 characters. Status, category, and priority filters accept only their documented names; numeric enum values are rejected.
+PostgreSQL is the durable source of truth. The ticket ID is the primary key, so duplicate submissions are decided by the database uniqueness constraint rather than a check-then-insert race.
 
----
+A duplicate `POST /tickets` is treated as an idempotent no-op: the existing ticket is not replaced and classification is not triggered again.
+
+### Asynchronous work
+
+The create endpoint only validates and persists the ticket as `pending`. A lightweight in-process `System.Threading.Channels` signal wakes the `ClassificationWorker`; it is not the durable work queue.
+
+The worker always queries PostgreSQL for pending tickets, so losing the in-memory signal does not lose persisted work.
+
+### Concurrency
+
+The worker processes up to four tickets concurrently. Each ticket gets its own dependency-injection scope and EF Core `DbContext`, so parallel classifications do not share tracked database state.
+
+### Restart behavior
+
+On startup, the worker performs a recovery scan for pending tickets. A ticket that was persisted before a restart is therefore eligible for classification even if its in-memory wake-up signal was lost.
+
+This is at-least-once classification. A crash after the model responds but before the result is saved can cause the ticket to be classified again after restart.
+
+### Retry policy
+
+A classifier exception or invalid model output counts as a classification attempt.
+
+- Maximum: 3 attempts
+- Invalid model output is never persisted
+- Attempts below 3 leave the ticket `pending`
+- Attempt 3 transitions the ticket to `failed`
+- Retries are picked up by a fixed 5-second scan interval
+
+Persistence errors are not counted as model attempts.
+
+### Prompt injection and untrusted content
+
+Ticket subject and body are untrusted data. The Gemini classifier keeps system instructions separate from the user-provided ticket content and wraps the ticket fields in explicit data boundaries.
+
+The system prompt tells the model to ignore commands and role overrides inside the ticket and gives it no tools or executable actions.
+
+These measures reduce risk and limit what an injected ticket can cause, but they do not make prompt injection impossible.
+
+### API shape
+
+- `POST /tickets` accepts `{ id, subject, body }` and returns `202 Accepted` with a `Location` header. Ticket bodies are limited to 100,000 characters.
+- Duplicate IDs are idempotent no-ops.
+- `GET /tickets/{id}` returns the full ticket or `404`.
+- `GET /tickets` supports `status`, `category`, and `priority` filters with pagination.
+- `POST /tickets/{id}/reclassify` re-queues a `classified` or `failed` ticket and returns `202`.
+- Reclassification returns `409` when the ticket is already `pending`, because resetting an in-flight retry would make the state and attempt count ambiguous.
+- Invalid request/filter values return problem details. Status, category, and priority filters accept only documented names; numeric enum values are rejected.
 
 ## 4. Model Boundary
 
-The AI provider is treated strictly as an **unreliable, untrusted external dependency**:
-- The classifier (`GeminiTicketClassifier`) returns raw, unvalidated strings as a `ClassificationCandidate` without attempting internal normalization or auto-repair (e.g., `"urgent"` is not converted to `"high"`).
-- The candidate must pass through `ITicketClassificationValidator`, which enforces strict allow-lists (`billing`, `technical`, `account`, `other` and `low`, `medium`, `high`) and summary length constraints (5–1,000 characters).
-- Only candidates that pass validation are mapped to typed domain enums and persisted as `classified`. Invalid outputs are rejected and trigger the failure/retry workflow.
+The model provider is treated as an unreliable dependency.
 
----
+```text
+provider output
+    -> ClassificationCandidate (raw strings)
+    -> TicketClassificationValidator
+    -> ValidatedClassification (typed values)
+    -> persistence
+```
+
+The validator only allows the documented category and priority values and applies summary length checks. It does not silently repair values such as `"urgent"` into `"high"`.
+
+Summary validation is intentionally structural; it does not prove that the summary is semantically correct.
 
 ## 5. Tests
 
-The test suite covers:
-- **Model Candidate Deserialization**: Correct mapping of structured LLM responses into `ClassificationCandidate`.
-- **Malformed & Empty Response Handling**: Graceful error handling and retry triggering for non-JSON or null model payloads.
-- **Strict Validation Without Normalization**: Verifying that unexpected strings are rejected rather than silently repaired.
-- **Prompt Isolation & Adversarial Containment**: Verifying XML data framing and ignoring prompt injection commands (such as `t-1005`).
-- **Worker Concurrency, Retries & State Transitions**: Bounded parallelism, failure retries up to attempt limits, stale update prevention, and startup crash recovery.
-- **HTTP Endpoint Behavior**: Ingestion idempotency, asynchronous signaling, body-size validation, retrieval, filtering, pagination, and invalid query filters.
-- **Service Registration & Configuration**: DI lifecycle validation and missing environment variable handling.
+The tests cover the parts most likely to regress:
 
-All tests use in-memory repositories and an `IChatClient` test double; **no API key, network access, or running database is required to run tests**.
+- model output parsing and malformed responses
+- strict validation without auto-repair
+- adversarial/prompt-injection input
+- worker concurrency, retries, stale updates, and restart recovery
+- HTTP ingestion, idempotency, filtering, pagination, and validation
+- ticket reclassification and its `202`/`404`/`409` behavior
+- configuration and service registration
 
-Execute the tests with:
+Run:
+
 ```bash
 dotnet test
 ```
 
----
+The test suite uses in-memory/test doubles, so it does not require a running PostgreSQL instance, API key, or network access.
 
 ## 6. Weaknesses & Limitations
 
-- **In-process wake-up signal**: `System.Threading.Channels` is local to a single process. In a multi-replica deployment, an instance would not receive wake-up signals for tickets inserted by sibling nodes (though the startup recovery query and retry polling would eventually process them).
-- **At-least-once classification**: Classification semantics are at-least-once rather than strictly exactly-once model execution. If the process crashes after the LLM responds but before the result is saved to PostgreSQL, the ticket will be re-classified upon restart.
-- **Single-instance concurrency**: The background worker does not use distributed locks (such as PostgreSQL advisory locks or `FOR UPDATE SKIP LOCKED`). Running multiple instances against the same database would result in concurrent duplicate classification attempts on the same pending tickets.
-- **Fixed retry backoff**: Retries poll on a fixed 5-second interval rather than using exponential backoff with jitter or honoring provider `Retry-After` headers.
-
----
+- The wake-up signal is in-process, so it is not suitable as a coordination mechanism between multiple application instances.
+- Classification is at-least-once rather than exactly-once.
+- The current worker does not coordinate multiple worker replicas, so running several instances against the same database can duplicate model work.
+- Retry timing is a fixed 5-second interval rather than exponential backoff with jitter.
 
 ## 7. With More Time
 
-- **Distributed Queue / Outbox Pattern:** Replace the in-process Channel with a distributed broker (e.g., RabbitMQ or AWS SQS) or a transactional outbox with `FOR UPDATE SKIP LOCKED` to support horizontal scaling across multiple worker replicas without duplicate processing.
-- **Stronger prompt-injection resistance:** Expand safeguards and test against a broader set of adversarial ticket content.
-- **Stronger summary validation:** Validate that generated summaries are concise, single-sentence, and representative of the ticket.
-- **Retry resilience:** Replace the fixed retry interval with exponential backoff and jitter.
+I would improve three areas without changing the basic architecture:
+
+- expand prompt-injection testing and hardening
+- add stronger checks for whether summaries are concise, single-sentence, and faithful to the ticket
+- use exponential retry backoff with jitter
