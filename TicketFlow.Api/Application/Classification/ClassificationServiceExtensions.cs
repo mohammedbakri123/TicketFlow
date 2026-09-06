@@ -8,7 +8,7 @@ public static class ClassificationServiceExtensions
     /// <summary>
     /// Registers the ticket classification services, validator, and provider-specific classifier
     /// based on the <c>AI_PROVIDER</c> configuration.
-    /// Supports "gemini" (default) and "fake" (for offline/deterministic development and testing).
+    /// Supports "fake" (default) and "gemini" for live provider integration.
     /// </summary>
     public static IServiceCollection AddTicketClassification(
         this IServiceCollection services,
