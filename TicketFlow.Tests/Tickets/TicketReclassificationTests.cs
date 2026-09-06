@@ -1,11 +1,16 @@
 namespace TicketFlow.Tests.Tickets;
 
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using TicketFlow.Api.Application.BackgroundWork;
 using TicketFlow.Api.Application.Tickets;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using TicketFlow.Api.Domain.Tickets;
 using TicketFlow.Api.Infrastructure.Persistence;
 using TicketFlow.Api.Infrastructure.Persistence.Repositories;
@@ -181,6 +186,50 @@ public class TicketReclassificationTests
         Assert.Equal(ReclassifyTicketResult.Requeued, result);
     }
 
+    private sealed class TestEndpointRouteBuilder(IServiceProvider sp) : IEndpointRouteBuilder
+    {
+        public ICollection<EndpointDataSource> DataSources { get; } = new List<EndpointDataSource>();
+        public IServiceProvider ServiceProvider { get; } = sp;
+        public IApplicationBuilder CreateApplicationBuilder() => throw new NotImplementedException();
+    }
+
+    private static async Task<(int StatusCode, string? Location, string Body)> InvokeReclassifyEndpointAsync(
+        string id,
+        TicketService service,
+        ITicketWorkSignal signal,
+        CancellationToken cancellationToken = default)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddRouting();
+        services.ConfigureHttpJsonOptions(options =>
+        {
+            options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+        });
+        services.AddSingleton(service);
+        services.AddSingleton(signal);
+        var sp = services.BuildServiceProvider();
+
+        var routeBuilder = new TestEndpointRouteBuilder(sp);
+        routeBuilder.MapTicketEndpoints();
+
+        var endpoint = routeBuilder.DataSources
+            .SelectMany(ds => ds.Endpoints)
+            .Single(e => e.Metadata.GetMetadata<EndpointNameMetadata>()?.EndpointName == "ReclassifyTicket");
+
+        var context = new DefaultHttpContext { RequestServices = sp };
+        context.Request.RouteValues["id"] = id;
+        context.Response.Body = new MemoryStream();
+
+        await endpoint.RequestDelegate!(context);
+
+        context.Response.Body.Seek(0, SeekOrigin.Begin);
+        using var reader = new StreamReader(context.Response.Body);
+        var body = await reader.ReadToEndAsync(cancellationToken);
+
+        return (context.Response.StatusCode, context.Response.Headers.Location.ToString(), body);
+    }
+
     [Fact]
     public async Task Endpoint_Requeued_Returns202AcceptedWithLocationAndBody_AndSignalsWorker()
     {
@@ -200,15 +249,12 @@ public class TicketReclassificationTests
         db.Tickets.Add(ticket);
         await db.SaveChangesAsync();
 
-        var result = await TicketEndpoints.ReclassifyEndpointAsync(
+        var (statusCode, location, body) = await InvokeReclassifyEndpointAsync(
             "t-accepted", service, signal, CancellationToken.None);
 
-        var statusResult = Assert.IsAssignableFrom<IStatusCodeHttpResult>(result);
-        Assert.Equal(StatusCodes.Status202Accepted, statusResult.StatusCode);
-
-        var location = result.GetType().GetProperty("Location")?.GetValue(result) as string;
+        Assert.Equal(StatusCodes.Status202Accepted, statusCode);
         Assert.Equal("/tickets/t-accepted", location);
-
+        Assert.Contains("\"pending\"", body);
         Assert.Equal(1, signal.SignalCallCount);
     }
 
@@ -231,17 +277,11 @@ public class TicketReclassificationTests
         db.Tickets.Add(ticket);
         await db.SaveChangesAsync();
 
-        var result = await TicketEndpoints.ReclassifyEndpointAsync(
+        var (statusCode, _, body) = await InvokeReclassifyEndpointAsync(
             "t-conflict", service, signal, CancellationToken.None);
 
-        Assert.IsAssignableFrom<IStatusCodeHttpResult>(result);
-        var statusResult = (IStatusCodeHttpResult)result;
-        Assert.Equal(StatusCodes.Status409Conflict, statusResult.StatusCode);
-
-        Assert.IsType<ProblemHttpResult>(result);
-        var problem = (ProblemHttpResult)result;
-        Assert.Equal("Ticket 't-conflict' is already pending classification.", problem.ProblemDetails.Detail);
-
+        Assert.Equal(StatusCodes.Status409Conflict, statusCode);
+        Assert.Contains("Ticket 't-conflict' is already pending classification.", body);
         Assert.Equal(0, signal.SignalCallCount);
     }
 
@@ -253,17 +293,11 @@ public class TicketReclassificationTests
         var service = new TicketService(repository);
         var signal = new RecordingWorkSignal();
 
-        var result = await TicketEndpoints.ReclassifyEndpointAsync(
+        var (statusCode, _, body) = await InvokeReclassifyEndpointAsync(
             "t-missing", service, signal, CancellationToken.None);
 
-        Assert.IsAssignableFrom<IStatusCodeHttpResult>(result);
-        var statusResult = (IStatusCodeHttpResult)result;
-        Assert.Equal(StatusCodes.Status404NotFound, statusResult.StatusCode);
-
-        Assert.IsType<ProblemHttpResult>(result);
-        var problem = (ProblemHttpResult)result;
-        Assert.Equal("Ticket 't-missing' was not found.", problem.ProblemDetails.Detail);
-
+        Assert.Equal(StatusCodes.Status404NotFound, statusCode);
+        Assert.Contains("Ticket 't-missing' was not found.", body);
         Assert.Equal(0, signal.SignalCallCount);
     }
 
@@ -277,13 +311,11 @@ public class TicketReclassificationTests
         var service = new TicketService(repository);
         var signal = new RecordingWorkSignal();
 
-        var result = await TicketEndpoints.ReclassifyEndpointAsync(
+        var (statusCode, _, body) = await InvokeReclassifyEndpointAsync(
             emptyId, service, signal, CancellationToken.None);
 
-        Assert.IsAssignableFrom<IStatusCodeHttpResult>(result);
-        var statusResult = (IStatusCodeHttpResult)result;
-        Assert.Equal(StatusCodes.Status400BadRequest, statusResult.StatusCode);
-
+        Assert.Equal(StatusCodes.Status400BadRequest, statusCode);
+        Assert.Contains("id is required.", body);
         Assert.Equal(0, signal.SignalCallCount);
     }
 
@@ -306,13 +338,10 @@ public class TicketReclassificationTests
         db.Tickets.Add(ticket);
         await db.SaveChangesAsync();
 
-        var result = await TicketEndpoints.ReclassifyEndpointAsync(
+        var (statusCode, location, _) = await InvokeReclassifyEndpointAsync(
             "  t-trim  ", service, signal, CancellationToken.None);
 
-        var statusResult = Assert.IsAssignableFrom<IStatusCodeHttpResult>(result);
-        Assert.Equal(StatusCodes.Status202Accepted, statusResult.StatusCode);
-
-        var location = result.GetType().GetProperty("Location")?.GetValue(result) as string;
+        Assert.Equal(StatusCodes.Status202Accepted, statusCode);
         Assert.Equal("/tickets/t-trim", location);
         Assert.Equal(1, signal.SignalCallCount);
     }
