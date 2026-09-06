@@ -203,4 +203,40 @@ public class TicketRepository(TicketFlowDbContext db, ILogger<TicketRepository> 
             ticket.Status);
         return true;
     }
+
+    /// <summary>
+    /// Reclassifies an existing ticket by resetting it to Pending status, resetting Attempts to 0,
+    /// and clearing existing classification fields.
+    /// Returns NotFound if not found, AlreadyPending if already Pending, or Requeued on success.
+    /// </summary>
+    public async Task<ReclassifyTicketResult> ReclassifyAsync(
+        string id,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+
+        var ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == id, cancellationToken);
+        if (ticket is null)
+        {
+            logger.LogWarning("Cannot reclassify: ticket '{TicketId}' was not found.", id);
+            return ReclassifyTicketResult.NotFound;
+        }
+
+        if (ticket.Status == TicketStatus.Pending)
+        {
+            logger.LogWarning("Cannot reclassify: ticket '{TicketId}' is already in Pending status.", id);
+            return ReclassifyTicketResult.AlreadyPending;
+        }
+
+        ticket.Status = TicketStatus.Pending;
+        ticket.Category = null;
+        ticket.Priority = null;
+        ticket.Summary = null;
+        ticket.Attempts = 0;
+        ticket.UpdatedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("Ticket '{TicketId}' reset to Pending for reclassification.", id);
+        return ReclassifyTicketResult.Requeued;
+    }
 }
