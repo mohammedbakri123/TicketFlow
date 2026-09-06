@@ -19,7 +19,7 @@ public static class ClassificationServiceExtensions
 
         var aiProvider = configuration["AI_PROVIDER"]
             ?? Environment.GetEnvironmentVariable("AI_PROVIDER")
-            ?? "gemini";
+            ?? "fake";
 
         if (string.Equals(aiProvider, "gemini", StringComparison.OrdinalIgnoreCase))
         {
