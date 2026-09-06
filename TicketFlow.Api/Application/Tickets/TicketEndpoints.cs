@@ -181,6 +181,58 @@ public static class TicketEndpoints
         .ProducesValidationProblem()
         .ProducesProblem(StatusCodes.Status500InternalServerError);
 
+        // POST /tickets/{id}/reclassify: re-queue an existing Classified or Failed ticket
+        // for background classification by resetting it to Pending. Returns 409 Conflict if
+        // the ticket is already Pending, and 404 Not Found if the ticket does not exist.
+        app.MapPost("/tickets/{id}/reclassify", ReclassifyEndpointAsync)
+        .WithName("ReclassifyTicket")
+        .Produces(StatusCodes.Status202Accepted)
+        .ProducesProblem(StatusCodes.Status404NotFound)
+        .ProducesProblem(StatusCodes.Status409Conflict)
+        .ProducesValidationProblem()
+        .ProducesProblem(StatusCodes.Status500InternalServerError);
+
         return app;
+    }
+
+    internal static async Task<IResult> ReclassifyEndpointAsync(
+        string id,
+        TicketService ticketService,
+        ITicketWorkSignal workSignal,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["id"] = ["id is required."]
+            });
+        }
+
+        var trimmedId = id.Trim();
+        var result = await ticketService.ReclassifyAsync(trimmedId, cancellationToken);
+
+        return result switch
+        {
+            ReclassifyTicketResult.NotFound => Results.Problem(
+                statusCode: StatusCodes.Status404NotFound,
+                title: "Not Found",
+                detail: $"Ticket '{trimmedId}' was not found."),
+
+            ReclassifyTicketResult.AlreadyPending => Results.Problem(
+                statusCode: StatusCodes.Status409Conflict,
+                title: "Conflict",
+                detail: $"Ticket '{trimmedId}' is already pending classification."),
+
+            ReclassifyTicketResult.Requeued => OnRequeued(trimmedId, workSignal),
+
+            _ => throw new InvalidOperationException($"Unexpected reclassify result: {result}")
+        };
+    }
+
+    private static IResult OnRequeued(string id, ITicketWorkSignal workSignal)
+    {
+        workSignal.Signal();
+        return Results.Accepted($"/tickets/{id}", new { id, status = TicketStatus.Pending });
     }
 }

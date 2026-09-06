@@ -17,4 +17,7 @@ public class TicketService(ITicketRepository ticketRepository)
         int pageSize,
         CancellationToken cancellationToken = default) =>
         ticketRepository.ListAsync(category, priority, page, pageSize, cancellationToken);
+
+    public Task<ReclassifyTicketResult> ReclassifyAsync(string id, CancellationToken cancellationToken = default) =>
+        ticketRepository.ReclassifyAsync(id, cancellationToken);
 }
