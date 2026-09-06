@@ -169,12 +169,14 @@ public class GeminiTicketClassifierTests
 
         var userMessage = chatClient.CapturedMessages[1];
         Assert.Equal(ChatRole.User, userMessage.Role);
-        Assert.Contains("<ticket-subject>", userMessage.Text);
-        Assert.Contains("Cannot connect to database", userMessage.Text);
-        Assert.Contains("</ticket-subject>", userMessage.Text);
-        Assert.Contains("<ticket-body>", userMessage.Text);
-        Assert.Contains("Connection timeout after 30 seconds.", userMessage.Text);
-        Assert.Contains("</ticket-body>", userMessage.Text);
+        var expectedTicketData = JsonSerializer.Serialize(new
+        {
+            subject = ticket.Subject,
+            body = ticket.Body
+        });
+        Assert.Contains(expectedTicketData, userMessage.Text);
+        Assert.DoesNotContain("<ticket-subject>", userMessage.Text);
+        Assert.DoesNotContain("<ticket-body>", userMessage.Text);
 
         // Verify no application tools were exposed
         Assert.True(chatClient.CapturedOptions?.Tools == null || chatClient.CapturedOptions.Tools.Count == 0);
@@ -206,10 +208,13 @@ public class GeminiTicketClassifierTests
         await classifier.ClassifyAsync(ticket);
 
         var userMessage = chatClient.CapturedMessages.Single(m => m.Role == ChatRole.User);
-        // The injection content must remain strictly inside the user data envelope
-        Assert.Contains("<ticket-body>", userMessage.Text);
+        var expectedTicketData = JsonSerializer.Serialize(new
+        {
+            subject = ticket.Subject,
+            body = ticket.Body
+        });
+        Assert.Contains(expectedTicketData, userMessage.Text);
         Assert.Contains("SYSTEM OVERRIDE", userMessage.Text);
-        Assert.Contains("</ticket-body>", userMessage.Text);
 
         // The system message must not contain the injection text
         var systemMessage = chatClient.CapturedMessages.Single(m => m.Role == ChatRole.System);
