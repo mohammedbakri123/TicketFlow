@@ -9,6 +9,7 @@ public interface ITicketRepository
     Task<Ticket?> GetByIdAsync(string id, CancellationToken cancellationToken = default);
 
     Task<(IReadOnlyList<Ticket> Items, int Total)> ListAsync(
+        TicketStatus? status,
         TicketCategory? category,
         TicketPriority? priority,
         int page,

@@ -110,10 +110,10 @@ curl "http://localhost:5024/tickets?pageSize=50"
 - **API Shape**:
   - `POST /tickets`: Accepts `{ id, subject, body }`, validates presence and field lengths, persists as `pending`, and returns `202 Accepted` with a `Location` header. Duplicate IDs are accepted as idempotent no-ops.
   - `GET /tickets/{id}`: Returns `200 OK` with full ticket details, or `404 Not Found`.
-  - `GET /tickets`: Returns paginated ticket summaries (`page`, `pageSize`, `total`), filterable by `category` and `priority`. Validation failures return standard RFC 7807 problem details.
+  - `GET /tickets`: Returns paginated ticket summaries (`page`, `pageSize`, `total`), filterable by `status`, `category`, and `priority`. Validation failures return standard RFC 7807 problem details.
   - `POST /tickets/{id}/reclassify`: Re-queues a Classified or Failed ticket for asynchronous classification by resetting it to Pending and returning `202 Accepted`. Returns `404` if the ticket does not exist and `409` if it is already Pending.
 
-  Ticket bodies are limited to 100,000 characters. Category and priority filters accept only their documented names; numeric enum values are rejected.
+  Ticket bodies are limited to 100,000 characters. Status, category, and priority filters accept only their documented names; numeric enum values are rejected.
 
 ---
 

@@ -30,6 +30,7 @@ public class TicketEndpointTests
         public List<Ticket> Tickets { get; } = [];
         public int AddCallCount { get; private set; }
         public int ListCallCount { get; private set; }
+        public TicketStatus? LastStatus { get; private set; }
         public TicketCategory? LastCategory { get; private set; }
         public TicketPriority? LastPriority { get; private set; }
         public int LastPage { get; private set; }
@@ -51,6 +52,7 @@ public class TicketEndpointTests
             Task.FromResult(Tickets.FirstOrDefault(ticket => ticket.Id == id));
 
         public Task<(IReadOnlyList<Ticket> Items, int Total)> ListAsync(
+            TicketStatus? status,
             TicketCategory? category,
             TicketPriority? priority,
             int page,
@@ -58,12 +60,18 @@ public class TicketEndpointTests
             CancellationToken cancellationToken = default)
         {
             ListCallCount++;
+            LastStatus = status;
             LastCategory = category;
             LastPriority = priority;
             LastPage = page;
             LastPageSize = pageSize;
 
             var query = Tickets.AsEnumerable();
+            if (status is not null)
+            {
+                query = query.Where(ticket => ticket.Status == status);
+            }
+
             if (category is not null)
             {
                 query = query.Where(ticket => ticket.Category == category);
@@ -266,6 +274,7 @@ public class TicketEndpointTests
                 Id = "t-billing-1",
                 Subject = "First",
                 Body = "Body",
+                Status = TicketStatus.Classified,
                 Category = TicketCategory.Billing,
                 Priority = TicketPriority.High,
                 CreatedAt = DateTime.UtcNow.AddMinutes(-2)
@@ -275,6 +284,7 @@ public class TicketEndpointTests
                 Id = "t-billing-2",
                 Subject = "Second",
                 Body = "Body",
+                Status = TicketStatus.Classified,
                 Category = TicketCategory.Billing,
                 Priority = TicketPriority.High,
                 CreatedAt = DateTime.UtcNow.AddMinutes(-1)
@@ -287,9 +297,10 @@ public class TicketEndpointTests
             "ListTickets",
             service,
             signal,
-            queryString: "?category=billing&priority=high&page=2&pageSize=1");
+            queryString: "?status=classified&category=billing&priority=high&page=2&pageSize=1");
 
         Assert.Equal(StatusCodes.Status200OK, response.StatusCode);
+        Assert.Equal(TicketStatus.Classified, repository.LastStatus);
         Assert.Equal(TicketCategory.Billing, repository.LastCategory);
         Assert.Equal(TicketPriority.High, repository.LastPriority);
         Assert.Equal(2, repository.LastPage);
@@ -299,6 +310,7 @@ public class TicketEndpointTests
     }
 
     [Theory]
+    [InlineData("?status=0")]
     [InlineData("?category=0")]
     [InlineData("?priority=1")]
     public async Task ListTickets_NumericEnumFilters_ReturnValidationProblem(string queryString)

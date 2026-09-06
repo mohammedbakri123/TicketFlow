@@ -30,6 +30,14 @@ public static class TicketEndpoints
             ["high"] = TicketPriority.High
         };
 
+    private static readonly IReadOnlyDictionary<string, TicketStatus> Statuses =
+        new Dictionary<string, TicketStatus>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["pending"] = TicketStatus.Pending,
+            ["classified"] = TicketStatus.Classified,
+            ["failed"] = TicketStatus.Failed
+        };
+
     public static IEndpointRouteBuilder MapTicketEndpoints(this IEndpointRouteBuilder app)
     {
         // POST /tickets: validate -> persist pending ticket -> 202 Accepted.
@@ -138,6 +146,7 @@ public static class TicketEndpoints
         .ProducesProblem(StatusCodes.Status500InternalServerError);
 
         app.MapGet("/tickets", async (
+            string? status,
             string? category,
             string? priority,
             int? page,
@@ -146,6 +155,19 @@ public static class TicketEndpoints
             CancellationToken cancellationToken) =>
         {
             var errors = new Dictionary<string, string[]>();
+
+            TicketStatus? statusFilter = null;
+            if (!string.IsNullOrWhiteSpace(status))
+            {
+                if (Statuses.TryGetValue(status, out var parsedStatus))
+                {
+                    statusFilter = parsedStatus;
+                }
+                else
+                {
+                    errors["status"] = [$"Invalid status '{status}'. Valid values are: pending, classified, failed."];
+                }
+            }
 
             TicketCategory? categoryFilter = null;
             if (!string.IsNullOrWhiteSpace(category))
@@ -192,7 +214,7 @@ public static class TicketEndpoints
             }
 
             var (items, total) = await ticketService.ListAsync(
-                categoryFilter, priorityFilter, currentPage, currentPageSize, cancellationToken);
+                statusFilter, categoryFilter, priorityFilter, currentPage, currentPageSize, cancellationToken);
 
             return Results.Ok(new TicketListResponse(
                 Items: items.Select(TicketListItemResponse.From).ToList(),

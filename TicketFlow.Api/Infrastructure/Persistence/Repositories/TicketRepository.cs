@@ -58,6 +58,7 @@ public class TicketRepository(TicketFlowDbContext db, ILogger<TicketRepository> 
 
     /// <summary>Filters and paginates tickets in the database query.</summary>
     public async Task<(IReadOnlyList<Ticket> Items, int Total)> ListAsync(
+        TicketStatus? status,
         TicketCategory? category,
         TicketPriority? priority,
         int page,
@@ -75,6 +76,11 @@ public class TicketRepository(TicketFlowDbContext db, ILogger<TicketRepository> 
         }
 
         var query = db.Tickets.AsNoTracking();
+
+        if (status is not null)
+        {
+            query = query.Where(t => t.Status == status);
+        }
 
         if (category is not null)
         {
