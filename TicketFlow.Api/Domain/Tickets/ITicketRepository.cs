@@ -37,4 +37,15 @@ public interface ITicketRepository
     Task<bool> RecordClassificationFailureAsync(
         string id,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reclassifies an existing ticket by resetting it to Pending status, resetting Attempts to 0,
+    /// and clearing existing classification fields.
+    /// Returns <see cref="ReclassifyTicketResult.NotFound"/> if the ticket does not exist,
+    /// <see cref="ReclassifyTicketResult.AlreadyPending"/> if the ticket is already in Pending status,
+    /// or <see cref="ReclassifyTicketResult.Requeued"/> if the ticket was successfully reset.
+    /// </summary>
+    Task<ReclassifyTicketResult> ReclassifyAsync(
+        string id,
+        CancellationToken cancellationToken = default);
 }
