@@ -111,6 +111,7 @@ curl "http://localhost:5024/tickets?pageSize=50"
   - `POST /tickets`: Accepts `{ id, subject, body }`, validates presence and field lengths, persists as `pending`, and returns `202 Accepted` with a `Location` header. Duplicate IDs are accepted as idempotent no-ops.
   - `GET /tickets/{id}`: Returns `200 OK` with full ticket details, or `404 Not Found`.
   - `GET /tickets`: Returns paginated ticket summaries (`page`, `pageSize`, `total`), filterable by `category` and `priority`. Validation failures return standard RFC 7807 problem details.
+  - `POST /tickets/{id}/reclassify`: Re-queues a Classified or Failed ticket for asynchronous classification by resetting it to Pending and returning `202 Accepted`. Returns `404` if the ticket does not exist and `409` if it is already Pending.
 
 ---
 
@@ -154,7 +155,6 @@ dotnet test
 ## 7. With More Time
 
 - **Distributed Queue / Outbox Pattern:** Replace the in-process Channel with a distributed broker (e.g., RabbitMQ or AWS SQS) or a transactional outbox with `FOR UPDATE SKIP LOCKED` to support horizontal scaling across multiple worker replicas without duplicate processing.
-- **Re-classification Endpoint:** Add an administrative endpoint (`POST /tickets/{id}/reclassify`) to re-queue tickets that failed due to transient outages or that need re-classification following a prompt or taxonomy update.
 - **Stronger prompt-injection resistance:** Expand safeguards and test against a broader set of adversarial ticket content.
 - **Stronger summary validation:** Validate that generated summaries are concise, single-sentence, and representative of the ticket.
 - **Retry resilience:** Replace the fixed retry interval with exponential backoff and jitter.
