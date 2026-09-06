@@ -113,6 +113,8 @@ curl "http://localhost:5024/tickets?pageSize=50"
   - `GET /tickets`: Returns paginated ticket summaries (`page`, `pageSize`, `total`), filterable by `category` and `priority`. Validation failures return standard RFC 7807 problem details.
   - `POST /tickets/{id}/reclassify`: Re-queues a Classified or Failed ticket for asynchronous classification by resetting it to Pending and returning `202 Accepted`. Returns `404` if the ticket does not exist and `409` if it is already Pending.
 
+  Ticket bodies are limited to 100,000 characters. Category and priority filters accept only their documented names; numeric enum values are rejected.
+
 ---
 
 ## 4. Model Boundary
@@ -132,6 +134,7 @@ The test suite covers:
 - **Strict Validation Without Normalization**: Verifying that unexpected strings are rejected rather than silently repaired.
 - **Prompt Isolation & Adversarial Containment**: Verifying XML data framing and ignoring prompt injection commands (such as `t-1005`).
 - **Worker Concurrency, Retries & State Transitions**: Bounded parallelism, failure retries up to attempt limits, stale update prevention, and startup crash recovery.
+- **HTTP Endpoint Behavior**: Ingestion idempotency, asynchronous signaling, body-size validation, retrieval, filtering, pagination, and invalid query filters.
 - **Service Registration & Configuration**: DI lifecycle validation and missing environment variable handling.
 
 All tests use in-memory repositories and an `IChatClient` test double; **no API key, network access, or running database is required to run tests**.

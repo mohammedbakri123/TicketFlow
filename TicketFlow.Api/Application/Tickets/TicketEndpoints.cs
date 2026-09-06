@@ -11,6 +11,24 @@ public static class TicketEndpoints
     private const int MaxPageSize = 100;
     private const int MaxIdLength = 100;
     private const int MaxSubjectLength = 255;
+    private const int MaxBodyLength = 100_000;
+
+    private static readonly IReadOnlyDictionary<string, TicketCategory> Categories =
+        new Dictionary<string, TicketCategory>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["billing"] = TicketCategory.Billing,
+            ["technical"] = TicketCategory.Technical,
+            ["account"] = TicketCategory.Account,
+            ["other"] = TicketCategory.Other
+        };
+
+    private static readonly IReadOnlyDictionary<string, TicketPriority> Priorities =
+        new Dictionary<string, TicketPriority>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["low"] = TicketPriority.Low,
+            ["medium"] = TicketPriority.Medium,
+            ["high"] = TicketPriority.High
+        };
 
     public static IEndpointRouteBuilder MapTicketEndpoints(this IEndpointRouteBuilder app)
     {
@@ -55,6 +73,10 @@ public static class TicketEndpoints
             if (string.IsNullOrWhiteSpace(request.Body))
             {
                 errors["body"] = ["body is required."];
+            }
+            else if (request.Body.Length > MaxBodyLength)
+            {
+                errors["body"] = [$"body must not exceed {MaxBodyLength} characters."];
             }
 
             if (errors.Count > 0)
@@ -128,7 +150,7 @@ public static class TicketEndpoints
             TicketCategory? categoryFilter = null;
             if (!string.IsNullOrWhiteSpace(category))
             {
-                if (Enum.TryParse<TicketCategory>(category, ignoreCase: true, out var parsedCategory))
+                if (Categories.TryGetValue(category, out var parsedCategory))
                 {
                     categoryFilter = parsedCategory;
                 }
@@ -141,7 +163,7 @@ public static class TicketEndpoints
             TicketPriority? priorityFilter = null;
             if (!string.IsNullOrWhiteSpace(priority))
             {
-                if (Enum.TryParse<TicketPriority>(priority, ignoreCase: true, out var parsedPriority))
+                if (Priorities.TryGetValue(priority, out var parsedPriority))
                 {
                     priorityFilter = parsedPriority;
                 }
